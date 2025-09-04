@@ -1,0 +1,9 @@
+yfinance
+pandas
+openpyxl
+azure-functions
+python-dotenv
+pyodbc
+python-jose[cryptography]
+passlib[bcrypt]
+sqlmodel
