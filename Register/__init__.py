@@ -1,6 +1,8 @@
+import re
 import logging
 import json
 import uuid
+import traceback
 from datetime import datetime
 import azure.functions as func
 from shared_code.database import db_handler
@@ -14,24 +16,34 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         body = req.get_json()
         username = body.get('username')
+        email = body.get('email')
         password = body.get('password')
+        pan_card = body.get('pan_card')
 
-        if not username or not password:
+        if not username or not password or not email or not pan_card:
             return func.HttpResponse(
                 "Please provide both username and password.",
                 status_code=400
             )
 
         with db_handler.get_session() as session:
-            existing_user = session.exec(select(User).where(User.username == username)).first()
+            existing_user = session.exec(select(User).where(User.email == email)).first()
             if existing_user:
                 return func.HttpResponse(
-                    "Username already exists.",
+                    "Email already exists.",
                     status_code=409
+                )
+            #email validation
+            if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", email):
+                return func.HttpResponse(
+                    "Invalid email address.",
+                    status_code=400
                 )
 
             user = User(user_id=str(uuid.uuid4()), 
                         username=username, 
+                        email=email,
+                        pan_card=pan_card,
                         hashed_password=get_password_hash(password),
                         created_at=datetime.now(),
                         updated_at=datetime.now()
@@ -54,6 +66,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 )
 
     except Exception as e:
+        logging.error(traceback.format_exc())
         return func.HttpResponse(
             f"Error during registration: {e}",
             status_code=500

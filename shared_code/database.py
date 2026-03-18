@@ -2,7 +2,7 @@ import urllib.parse
 from sqlmodel import create_engine, Session, SQLModel
 from sqlalchemy.pool import QueuePool
 from config import Config
-from shared_code.models import User, Transaction 
+from shared_code.models import User, Transaction, Holdings, GoogleOAuthToken
 
 class Database:
     def __init__(self):

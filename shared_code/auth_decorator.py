@@ -37,6 +37,7 @@ def auth_required(f):
             "updated_at": user.updated_at,
             "last_login": user.last_login
         }
+        req.user_id = user.user_id
         return f(req, *args, **kwargs)
     
     return decorated_function
