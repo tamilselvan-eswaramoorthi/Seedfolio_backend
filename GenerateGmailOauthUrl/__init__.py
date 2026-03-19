@@ -27,7 +27,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request to generate Gmail OAuth URL.')
 
     try:
-        url = generate_google_oauth_url(redirect_uri=Config.REDIRECT_URI, state=req.user_id)
+        url = generate_google_oauth_url(redirect_uri=Config.REDIRECT_URI, state=req.user_id) # type: ignore
         return func.HttpResponse(
             body=json.dumps({"oauth_url": url}),
             mimetype="application/json",

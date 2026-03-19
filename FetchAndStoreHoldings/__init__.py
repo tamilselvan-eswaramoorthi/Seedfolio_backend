@@ -14,7 +14,7 @@ from shared_code.auth_decorator import auth_required
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Triggered FetchAndStoreHoldings API')
     try:
-        user_id = req.user_id
+        user_id = req.user_id  # type: ignore
         gmail_client = GetHoldingsFromGmail(user_id=user_id)
         holdings_list = gmail_client.fetch_from_emails(user_id=user_id)
 
