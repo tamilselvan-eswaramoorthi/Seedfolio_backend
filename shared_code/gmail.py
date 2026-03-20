@@ -1,6 +1,9 @@
 import base64
+import email
+from math import e
 import re
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -11,8 +14,9 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from sympy import E
 
-from shared_code.zerodha import ExtractHoldings
+from shared_code.pdf_processor import ExtractHoldings
 from shared_code.database import db_handler
 from shared_code.models import GoogleOAuthToken, User, Holdings, Transaction
 
@@ -26,6 +30,7 @@ class GetHoldingsFromGmail:
         self.authenticate()
         self.zerodha_query = "from:no-reply-transaction-with-holding-statement@reportsmailer.zerodha.net"
         self.nse_query = "from:nse-direct@nse.co.in"
+        self.bse_query = "from:mgrpt@bseindia.com"
 
     def _get_user_details(self):
         with db_handler.get_session() as session:
@@ -118,207 +123,85 @@ class GetHoldingsFromGmail:
             except:
                 return date_str
         return None
-
-    def fetch_from_emails(self, user_id):
-        consolidated_holdings: dict = {}
-        try:
-            # 1. Fetch latest email from zerodha
-            results = self.service.users().messages().list(userId="me", q=self.zerodha_query, maxResults=1).execute() # type: ignore
-            messages = results.get("messages", [])
-
-            if messages:
-                msg = self.service.users().messages().get(userId="me", id=messages[0]["id"]).execute() # type: ignore
-                                
-                # Fetch attachments IN-MEMORY
-                attachments = self.get_attachments_in_memory("me", msg['id'], msg.get("payload", {}))
+        
+    def _incremental_processing(self, extractions, email_date=None):
+        consolidated_transactions = []
+        with db_handler.get_session() as session:
+            for item in extractions:
+                symbol = item.get("symbol")
+                transaction_type = item.get("transaction_type", "BUY").upper()
+                if not symbol:
+                    continue
+                try:
+                    qty = float(str(item.get("quantity", 0)).replace(",", ""))
+                    rate = float(str(item.get("rate", 0)).replace(",", ""))
+                except ValueError:
+                    continue
                 
-                for att in attachments:
-                    if str(att["filename"]).lower().endswith(".pdf"):
-                        print(f"Processing Zerodha PDF in-memory: {att['filename']}")
-                        # Pass the raw byte stream directly to PyMuPDF!
-                        zerodha_holdings = self.extractor.extract_last_zerodha_holdings(att["data"], self.PASSWORD)
-                        if zerodha_holdings is not None:
-                            with db_handler.get_session() as session:
-                                for item in zerodha_holdings:
-                                    symbol = item.get("symbol")
-                                    if not symbol:
-                                        continue
-                                    try:
-                                        qty = float(str(item.get("quantity", 0)).replace(",", ""))
-                                        rate = float(str(item.get("rate", 0)).replace(",", ""))
-                                    except ValueError:
-                                        continue
-                                    
-                                    # Update/Create Holding in DB
-                                    holding = session.exec(select(Holdings).where(Holdings.user_id == user_id, Holdings.stock_symbol == symbol)).first()
-                                    if holding:
-                                        holding.quantity = int(qty)
-                                        holding.avg_rate = rate
-                                        if item.get("timestamp"):
-                                            holding.holding_datetime = datetime.strptime(item["timestamp"], "%Y-%m-%d")
-                                    else:
-                                        holding = Holdings(
-                                            holding_id=str(uuid.uuid4()),
-                                            user_id=user_id,
-                                            stock_symbol=symbol,
-                                            company_name=item.get("company_name", ""),
-                                            quantity=int(qty),
-                                            avg_rate=rate,
-                                            holding_datetime=datetime.strptime(item["timestamp"], "%Y-%m-%d") if item.get("timestamp") else datetime.now()
-                                        )
-                                    session.add(holding)
-
-                                    consolidated_holdings[symbol] = {
-                                        "company_name": item.get("company_name", ""),
-                                        "symbol": symbol.split(".")[0],
-                                        "quantity": qty,
-                                        "rate": rate,
-                                        "timestamp": item.get("timestamp"),
-                                    }
-                                session.commit()
-                        else:
-                            print("Failed to extract Zerodha holdings table.")
-            else:
-                print("No messages found from Zerodha.")
-                return list(consolidated_holdings.values())
-            print (f"Found from last holding report {len(consolidated_holdings)} stocks.")
-
-            # 2. Fetch all emails from NSE from that datetime
-            nse_query = self.nse_query
-            with db_handler.get_session() as session:
-                max_date = session.query(sa_func.max(Holdings.holding_datetime)).filter(Holdings.user_id == user_id).scalar()
-                if max_date is not None:
-                    after_timestamp_sec = int(max_date.replace(tzinfo=timezone.utc).timestamp())
-                    nse_query = f"{self.nse_query} after:{after_timestamp_sec}"
-                elif len(consolidated_holdings) > 0:
-                    #find the latest timestamp from the zerodha holdings and use that as the after timestamp for nse query
-                    timestamps = []
-                    for item in consolidated_holdings.values():
-                        if item.get("timestamp") is not None:
-                            timestamps.append(datetime.strptime(item["timestamp"], "%Y-%m-%d"))
-                    latest_zerodha_timestamp = max(timestamps, default=None)
-                    if latest_zerodha_timestamp:
-                        after_timestamp_sec = int(latest_zerodha_timestamp.replace(tzinfo=timezone.utc).timestamp())
-                        nse_query = f"{self.nse_query} after:{after_timestamp_sec}"
-
-            print (f"\nQuerying NSE emails with: {nse_query}")
-            page_token = None
-            nse_messages = []
-            while True:
-                nse_results = self.service.users().messages().list( # type: ignore
-                    userId="me", q=nse_query, pageToken=page_token).execute()
+                trade_datetime = item.get("trade_datetime")
                 
-                if "messages" in nse_results:
-                    nse_messages.extend(nse_results["messages"])
-                
-                page_token = nse_results.get("nextPageToken")
-                if not page_token:
-                    break
 
-            print (f"Found {len(nse_messages)} NSE emails after that datetime.")
+                # 1. Add Transaction to DB
+                transaction = Transaction(
+                    transaction_id=str(uuid.uuid4()),
+                    user_id=self.user_id,
+                    transaction_datetime=trade_datetime if trade_datetime else datetime.now(),
+                    stock_symbol=symbol,
+                    stock_name=item.get("company_name", ""),
+                    transaction_type=transaction_type,
+                    quantity=int(qty),
+                    exchange=item.get("exchange", ""),
+                    price=rate
+                )
+                session.add(transaction)
 
-            if nse_messages:
-                for nse_msg_ref in nse_messages:
-                    nse_msg = self.service.users().messages().get(userId="me", id=nse_msg_ref["id"]).execute() # type: ignore
-                        
-                    nse_attachments = self.get_attachments_in_memory("me", nse_msg['id'], nse_msg.get("payload", {}))
-                    
-                    for att in nse_attachments:
-                        if str(att["filename"]).lower().endswith(".pdf"):
-                            email_date = self._extract_nse_date(nse_msg)
-                            nse_holdings = self.extractor.extract_nse_pdf(att["data"], self.PASSWORD, email_date)
-                            if nse_holdings is not None:
-                                with db_handler.get_session() as session:
-                                    for item in nse_holdings:
-                                        symbol = item.get("symbol")
-                                        if not symbol:
-                                            continue
-                                        try:
-                                            qty = float(str(item.get("quantity", 0)).replace(",", ""))
-                                            rate = float(str(item.get("rate", 0)).replace(",", ""))
-                                        except ValueError:
-                                            continue
-                                            
-                                        dt = None
-                                        if email_date and item.get("trade_time"):
-                                            try:
-                                                timestamp_str = f"{email_date} {item.get('trade_time')}"
-                                                dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S %p")
-                                                timestamp = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                                            except:
-                                                timestamp = None
-                                        else:
-                                            timestamp = None
+                # 2. Update/Create Holding in DB
+                holding = session.exec(select(Holdings).where(Holdings.user_id == self.user_id, Holdings.stock_symbol == symbol)).first()
+                if holding:
+                    old_qty = holding.quantity
+                    old_rate = holding.avg_buy
+                    if transaction_type == "BUY":
+                        new_qty = old_qty + int(qty)
+                        new_rate = ((old_qty * old_rate) + (int(qty) * rate)) / new_qty if new_qty > 0 else 0
+                        holding.quantity = new_qty
+                        holding.avg_buy = float(f"{new_rate:.2f}")
+                        # realized_pl unchanged for buy
+                    elif transaction_type == "SELL":
+                        new_qty = old_qty - int(qty)
+                        realized_pl = (rate - old_rate) * int(qty)
+                        holding.quantity = new_qty
+                        # avg_buy remains unchanged
+                        holding.realized_pl = holding.realized_pl + realized_pl if holding.realized_pl else realized_pl
+                    if trade_datetime:
+                        holding.holding_datetime = trade_datetime
+                else:
+                    holding = Holdings(
+                        holding_id=str(uuid.uuid4()),
+                        user_id=self.user_id,
+                        stock_symbol=symbol,
+                        company_name=item.get("company_name", ""),
+                        quantity=int(qty) if transaction_type == "BUY" else -int(qty),
+                        avg_buy=rate,
+                        realized_pl=0.0,
+                        holding_datetime=trade_datetime if trade_datetime else datetime.now()
+                    )
+                session.add(holding)
 
-                                        print (f"stock brought on {timestamp} is {qty} of {symbol} at {rate}")
-                                        
-                                        # 1. Add Transaction to DB
-                                        transaction = Transaction(
-                                            transaction_id=str(uuid.uuid4()),
-                                            user_id=user_id,
-                                            transaction_datetime=dt if dt else datetime.now(),
-                                            stock_symbol=symbol,
-                                            transaction_type="BUY",
-                                            quantity=int(qty),
-                                            price=rate,
-                                            processed=True
-                                        )
-                                        session.add(transaction)
-
-                                        # 2. Update/Create Holding in DB
-                                        holding = session.exec(select(Holdings).where(Holdings.user_id == user_id, Holdings.stock_symbol == symbol)).first()
-                                        if holding:
-                                            old_qty = holding.quantity
-                                            old_rate = holding.avg_rate
-                                            new_qty = old_qty + int(qty)
-                                            new_rate = ((old_qty * old_rate) + (int(qty) * rate)) / new_qty if new_qty > 0 else 0
-                                            holding.quantity = new_qty
-                                            holding.avg_rate = float(f"{new_rate:.2f}")
-                                            if dt:
-                                                holding.holding_datetime = dt
-                                        else:
-                                            holding = Holdings(
-                                                holding_id=str(uuid.uuid4()),
-                                                user_id=user_id,
-                                                stock_symbol=symbol,
-                                                company_name=item.get("company_name", ""),
-                                                quantity=int(qty),
-                                                avg_rate=rate,
-                                                holding_datetime=dt if dt else datetime.now()
-                                            )
-                                        session.add(holding)
-
-                                        if symbol in consolidated_holdings:
-                                            holding_dict = consolidated_holdings.get(symbol, {})
-                                            old_qty = float(holding_dict.get("quantity", 0.0))
-                                            old_rate = float(holding_dict.get("rate", 0.0))
-                                            new_qty = old_qty + qty
-                                            new_rate = ((old_qty * old_rate) + (qty * rate)) / new_qty if new_qty > 0 else 0
-                                            holding_dict["quantity"] = new_qty
-                                            holding_dict["rate"] = float(f"{new_rate:.2f}")
-                                            holding_dict["timestamp"] = timestamp
-                                        else:
-                                            consolidated_holdings[symbol] = {
-                                                "company_name": item.get("company_name", ""),
-                                                "symbol": symbol.split(".")[0],
-                                                "quantity": qty,
-                                                "rate": rate,
-                                                "timestamp": timestamp
-                                            }
-                                    session.commit()
-                            else:
-                                print("  Failed to extract NSE table.")
-            else:
-                print("No NSE messages found after that datetime.")
-
-        except HttpError as error:
-            print(f"An error occurred: {error}")
-            
-        return list(consolidated_holdings.values())
+                consolidated_transactions.append({
+                    "company_name": item.get("company_name", ""),
+                    "symbol": symbol,
+                    "quantity": qty,
+                    "rate": rate,
+                    "timestamp": trade_datetime
+                })
+            session.commit()
+        return consolidated_transactions
 
     def fetch_incremental_nse_emails(self, after_timestamp_sec: int):
-        consolidated_nse = []
-        nse_query = f"{self.nse_query} after:{after_timestamp_sec}"
+        if after_timestamp_sec is not None:
+            nse_query = f"{self.nse_query} after:{after_timestamp_sec}"
+        else:
+            nse_query = self.nse_query
         print(f"\nQuerying NSE emails incrementally with: {nse_query}")
         
         page_token = None
@@ -333,81 +216,55 @@ class GetHoldingsFromGmail:
             page_token = nse_results.get("nextPageToken")
             if not page_token:
                 break
-
+        print (f"Found {len(nse_messages)} NSE emails to process incrementally.")
         if nse_messages:
-            for nse_msg_ref in nse_messages:
+            for index, nse_msg_ref in enumerate(nse_messages):
                 nse_msg = self.service.users().messages().get(userId="me", id=nse_msg_ref["id"]).execute() # type: ignore
                 nse_attachments = self.get_attachments_in_memory("me", nse_msg['id'], nse_msg.get("payload", {}))
                 
                 for att in nse_attachments:
                     if str(att["filename"]).lower().endswith(".pdf"):
                         email_date = self._extract_nse_date(nse_msg)
+                        if email_date is None:
+                            email_date = nse_msg.get("internalDate")
+                            email_date = datetime.fromtimestamp(int(email_date) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
                         nse_holdings = self.extractor.extract_nse_pdf(att["data"], self.PASSWORD, email_date)
                         if nse_holdings is not None:
-                            with db_handler.get_session() as session:
-                                for item in nse_holdings:
-                                    symbol = item.get("symbol")
-                                    if not symbol:
-                                        continue
-                                    try:
-                                        qty = float(str(item.get("quantity", 0)).replace(",", ""))
-                                        rate = float(str(item.get("rate", 0)).replace(",", ""))
-                                    except ValueError:
-                                        continue
-                                    
-                                    dt = None
-                                    if email_date and item.get("trade_time"):
-                                        try:
-                                            timestamp_str = f"{email_date} {item.get('trade_time')}"
-                                            dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S %p")
-                                            timestamp = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                                        except:
-                                            timestamp = None
-                                    else:
-                                        timestamp = None
+                            self._incremental_processing(nse_holdings, email_date)
+                print (f"Processed NSE email {index + 1}/{len(nse_messages)}")
 
-                                    # 1. Add Transaction to DB
-                                    transaction = Transaction(
-                                        transaction_id=str(uuid.uuid4()),
-                                        user_id=self.user_id,
-                                        transaction_datetime=dt if dt else datetime.now(),
-                                        stock_symbol=symbol,
-                                        transaction_type="BUY",
-                                        quantity=int(qty),
-                                        price=rate,
-                                        processed=True
-                                    )
-                                    session.add(transaction)
+    def fetch_incremental_bse_emails(self, after_timestamp_sec: int):
+        bse_query = self.bse_query
+        if after_timestamp_sec is not None:
+            bse_query = f"{self.bse_query} after:{after_timestamp_sec}"
+        else:
+            bse_query = self.bse_query  
+        
+        page_token = None
+        nse_messages = []
+        while True:
+            bse_results = self.service.users().messages().list( # type: ignore
+                userId="me", q=bse_query, pageToken=page_token).execute()
 
-                                    # 2. Update/Create Holding in DB
-                                    holding = session.exec(select(Holdings).where(Holdings.user_id == self.user_id, Holdings.stock_symbol == symbol)).first()
-                                    if holding:
-                                        old_qty = holding.quantity
-                                        old_rate = holding.avg_rate
-                                        new_qty = old_qty + int(qty)
-                                        new_rate = ((old_qty * old_rate) + (int(qty) * rate)) / new_qty if new_qty > 0 else 0
-                                        holding.quantity = new_qty
-                                        holding.avg_rate = float(f"{new_rate:.2f}")
-                                        if dt:
-                                            holding.holding_datetime = dt
-                                    else:
-                                        holding = Holdings(
-                                            holding_id=str(uuid.uuid4()),
-                                            user_id=self.user_id,
-                                            stock_symbol=symbol,
-                                            company_name=item.get("company_name", ""),
-                                            quantity=int(qty),
-                                            avg_rate=rate,
-                                            holding_datetime=dt if dt else datetime.now()
-                                        )
-                                    session.add(holding)
+            if "messages" in bse_results:
+                nse_messages.extend(bse_results["messages"])
 
-                                    consolidated_nse.append({
-                                        "company_name": item.get("company_name", ""),
-                                        "symbol": symbol,
-                                        "quantity": qty,
-                                        "rate": rate,
-                                        "timestamp": timestamp
-                                    })
-                                session.commit()
-        return consolidated_nse
+            page_token = bse_results.get("nextPageToken")
+            if not page_token:
+                break
+        print (f"Found {len(nse_messages)} BSE emails to process incrementally.")
+        if nse_messages:
+            for index, nse_msg_ref in enumerate(nse_messages):
+                nse_msg = self.service.users().messages().get(userId="me", id=nse_msg_ref["id"]).execute() # type: ignore
+                nse_attachments = self.get_attachments_in_memory("me", nse_msg['id'], nse_msg.get("payload", {}))
+                
+                for att in nse_attachments:
+                    if str(att["filename"]).lower().endswith(".pdf"):
+                        extractions = self.extractor.extract_bse_pdf(att["data"], self.PASSWORD)
+                        if extractions is not None:
+                            self._incremental_processing(extractions)
+                print (f"Processed BSE email {index + 1}/{len(nse_messages)}")
+        
+    def fetch_incremental_emails(self, after_timestamp_sec: int):
+        self.fetch_incremental_nse_emails(after_timestamp_sec)
+        # self.fetch_incremental_bse_emails(after_timestamp_sec)

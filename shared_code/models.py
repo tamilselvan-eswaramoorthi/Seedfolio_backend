@@ -20,11 +20,12 @@ class Transaction(SQLModel, table=True):
     user_id: Optional[str] = Field(default=None, foreign_key="user.user_id", max_length=36)
     transaction_datetime: datetime = Field(default_factory=datetime.now, nullable=False)
     stock_symbol: str = Field(default="", max_length=20)
+    stock_name: str = Field(default="", max_length=255)
     transaction_type: str = Field(default="", max_length=10)
     quantity: int = Field(default=0)
     price: float = Field(default=0.0)
+    exchange: str = Field(default="", max_length=10) 
     commission_local: float = Field(default=0.0)
-    processed: bool = Field(default=True)
     user: Optional[User] = Relationship(back_populates="transactions")
 
 class Holdings(SQLModel, table=True):
@@ -34,7 +35,8 @@ class Holdings(SQLModel, table=True):
     stock_symbol: str = Field(default="", max_length=20)
     company_name: str = Field(default="", max_length=255)
     quantity: int = Field(default=0)
-    avg_rate: float = Field(default=0.0)
+    avg_buy: float = Field(default=0.0)
+    realized_pl: float = Field(default=0.0)
     user: Optional[User] = Relationship(back_populates="holdings")
 
 class GoogleOAuthToken(SQLModel, table=True):

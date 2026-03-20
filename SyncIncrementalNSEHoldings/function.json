@@ -9,7 +9,7 @@
       "methods": [
         "post"
       ],
-      "route": "holdings/sync-nse"
+      "route": "holdings/sync-transactions"
     },
     {
       "type": "http",

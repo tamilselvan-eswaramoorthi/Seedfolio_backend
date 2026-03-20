@@ -268,16 +268,15 @@ class PortfolioAnalysis:
             "max_drawdown_duration_days": max_drawdown_duration
         }
 
-    def get_current_holdings(self, transactions, tickers = None, portfolio_df = None, avg_buy_prices = None, sell_transactions = None):
+    def get_current_holdings(self, holdings, tickers = None, portfolio_df = None, avg_buy_prices = None, sell_transactions = None):
         """Get current holdings with unrealized and realized gains"""
-        transactions_df = self.convert_transactions(transactions)
         if tickers is None:
-            portfolio_df = transactions_df.groupby('Ticker')['Shares'].sum().reset_index()
+            portfolio_df = holdings.groupby('Ticker')['Shares'].sum().reset_index()
             portfolio_df = portfolio_df[portfolio_df['Shares'] > 0]
             tickers = portfolio_df['Ticker'].unique().tolist()
             # Calculate total realized and unrealized gains
-            buy_transactions = transactions_df[transactions_df['Type'] == 'buy']
-            sell_transactions = transactions_df[transactions_df['Type'] == 'sell']
+            buy_transactions = holdings[holdings['Type'] == 'buy']
+            sell_transactions = holdings[holdings['Type'] == 'sell']
 
             # Calculate average buy price for each ticker
             avg_buy_prices = buy_transactions.groupby('Ticker').apply(lambda x: (x['Price'] * x['Shares']).sum() / x['Shares'].sum()).to_dict()
