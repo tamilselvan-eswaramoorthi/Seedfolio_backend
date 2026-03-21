@@ -1,5 +1,4 @@
 import base64
-import email
 from math import e
 import re
 import json
@@ -8,13 +7,10 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlmodel import select
-from sqlalchemy import func as sa_func
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from sympy import E
 
 from shared_code.pdf_processor import ExtractHoldings
 from shared_code.database import db_handler
@@ -124,6 +120,11 @@ class GetHoldingsFromGmail:
                 return date_str
         return None
         
+
+    # ------------------------------------------------------------------
+    # Core incremental processing
+    # ------------------------------------------------------------------
+
     def _incremental_processing(self, extractions, email_date=None):
         consolidated_transactions = []
         with db_handler.get_session() as session:
@@ -137,9 +138,8 @@ class GetHoldingsFromGmail:
                     rate = float(str(item.get("rate", 0)).replace(",", ""))
                 except ValueError:
                     continue
-                
+
                 trade_datetime = item.get("trade_datetime")
-                
 
                 # 1. Add Transaction to DB
                 transaction = Transaction(
@@ -156,7 +156,13 @@ class GetHoldingsFromGmail:
                 session.add(transaction)
 
                 # 2. Update/Create Holding in DB
-                holding = session.exec(select(Holdings).where(Holdings.user_id == self.user_id, Holdings.stock_symbol == symbol)).first()
+                holding = session.exec(
+                    select(Holdings).where(
+                        Holdings.user_id == self.user_id,
+                        Holdings.stock_symbol == symbol
+                    )
+                ).first()
+
                 if holding:
                     old_qty = holding.quantity
                     old_rate = holding.avg_buy
@@ -165,13 +171,13 @@ class GetHoldingsFromGmail:
                         new_rate = ((old_qty * old_rate) + (int(qty) * rate)) / new_qty if new_qty > 0 else 0
                         holding.quantity = new_qty
                         holding.avg_buy = float(f"{new_rate:.2f}")
-                        # realized_pl unchanged for buy
                     elif transaction_type == "SELL":
                         new_qty = old_qty - int(qty)
                         realized_pl = (rate - old_rate) * int(qty)
                         holding.quantity = new_qty
-                        # avg_buy remains unchanged
-                        holding.realized_pl = holding.realized_pl + realized_pl if holding.realized_pl else realized_pl
+                        holding.realized_pl = (
+                            holding.realized_pl + realized_pl if holding.realized_pl else realized_pl
+                        )
                     if trade_datetime:
                         holding.holding_datetime = trade_datetime
                 else:
@@ -267,4 +273,4 @@ class GetHoldingsFromGmail:
         
     def fetch_incremental_emails(self, after_timestamp_sec: int):
         self.fetch_incremental_nse_emails(after_timestamp_sec)
-        # self.fetch_incremental_bse_emails(after_timestamp_sec)
+        self.fetch_incremental_bse_emails(after_timestamp_sec)
