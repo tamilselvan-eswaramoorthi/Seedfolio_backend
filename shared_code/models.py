@@ -52,3 +52,11 @@ class GoogleOAuthToken(SQLModel, table=True):
     account: str = Field(default="", max_length=255)
     expiry: Optional[datetime] = Field(default=None)
     user: Optional["User"] = Relationship(back_populates="google_token")
+
+class Stock(SQLModel, table=True):
+    isin_code: str = Field(primary_key=True, max_length=20)
+    name: str = Field(max_length=255)
+    nse_symbol: Optional[str] = Field(default=None, index=True, max_length=50)
+    bse_symbol: Optional[str] = Field(default=None, index=True, max_length=50)
+    type: str = Field(default="stock", max_length=20, index=True)
+    last_updated: datetime = Field(default_factory=datetime.now, nullable=False)

@@ -159,7 +159,7 @@ class GetHoldingsFromGmail:
                 holding = session.exec(
                     select(Holdings).where(
                         Holdings.user_id == self.user_id,
-                        Holdings.stock_symbol == symbol
+                        Holdings.stock_symbol == symbol.split(".")[0]
                     )
                 ).first()
 
@@ -184,7 +184,7 @@ class GetHoldingsFromGmail:
                     holding = Holdings(
                         holding_id=str(uuid.uuid4()),
                         user_id=self.user_id,
-                        stock_symbol=symbol,
+                        stock_symbol=symbol.split(".")[0],
                         company_name=item.get("company_name", ""),
                         quantity=int(qty) if transaction_type == "BUY" else -int(qty),
                         avg_buy=rate,

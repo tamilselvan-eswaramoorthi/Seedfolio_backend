@@ -15,33 +15,14 @@ from typing import Any, Dict, List, Optional
 # ---------------------------------------------------------------------------
 # DEMERGER REGISTRY
 # ---------------------------------------------------------------------------
-# Each entry maps an original symbol to one or more spun-off symbols.
-#
-# Fields:
-#   effective_date : date the demerger took effect on the exchange
-#   original       : symbol that was held BEFORE the demerger
-#   children       : list of dicts, one per resulting entity
-#       symbol          : new ticker symbol  (NSE format, e.g. "TATAMOTORS.NS")
-#       ratio           : how many NEW shares are credited per 1 ORIGINAL share
-#       price_ratio     : fraction of the original avg-buy cost to allocate
-#                         (all children price_ratios must sum to 1.0)
-#       keep_original   : if True the original symbol is kept (just re-valued);
-#                         if False the original holding is closed.
-# ---------------------------------------------------------------------------
+
 DEMERGER_REGISTRY: List[Dict[str, Any]] = [
-    # ── Tata Motors Passenger / Commercial demerger ─────────────────────────
-    # Effective date: 2 January 2025
-    # For every 1 TATAMOTORS share held:
-    #   • 1 TATAMOTORS share (passenger vehicles) is retained
-    #   • 1 TATAMTRDVR share (commercial vehicles) is credited  ← adjust ratio
-    #     if NSE actually issues a different ratio; the 1:1 is illustrative.
-    # Cost allocation is approximate based on the scheme of arrangement.
-    # Adjust price_ratio values once NCLT order publishes the exact split.
+
     {
         "effective_date": date(2025, 1, 2),
         "original": "TATAMOTORS.NS",
-        "raw_symbol": "TATAMOTORS",        # as it appears verbatim in the NSE PDF
-        "bse_scrip_code": "500570",         # BSE scrip code for Tata Motors
+        "raw_symbol": "TATAMOTORS",
+        "bse_scrip_code": "500570",
         "children": [
             {
                 "symbol": "TMPV.NS",
@@ -61,17 +42,6 @@ DEMERGER_REGISTRY: List[Dict[str, Any]] = [
             },
         ],
     },
-
-    # ── Add more demergers below as they occur ───────────────────────────────
-    # Example template:
-    # {
-    #     "effective_date": date(2025, 6, 1),
-    #     "original": "PARENTCO.NS",
-    #     "children": [
-    #         {"symbol": "PARENTCO.NS",  "ratio": 1.0, "price_ratio": 0.60, "keep_original": True},
-    #         {"symbol": "SPINOFFCO.NS", "ratio": 2.0, "price_ratio": 0.40, "keep_original": False},
-    #     ],
-    # },
 ]
 
 # ---------------------------------------------------------------------------

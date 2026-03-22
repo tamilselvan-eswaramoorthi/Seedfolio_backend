@@ -1,19 +1,20 @@
 import re
 import fitz
-import requests
 import pandas as pd
+from sqlmodel import select, or_
 from datetime import date as date_type, datetime as datetime_type, timezone
-import difflib
 
 from shared_code.corporate_actions import (
-    get_demerger, get_demerger_by_raw_symbol, get_demerger_by_bse_code,
+    get_demerger_by_raw_symbol, get_demerger_by_bse_code,
     get_split, get_bonus
 )
+from shared_code.database import db_handler
+from shared_code.models import Stock
+
 
 
 class ExtractHoldings:
     def __init__(self):
-        self.FINNHUB_TOKEN = "d6t7lt9r01qoqoisi740d6t7lt9r01qoqoisi74g"
         self.pattern = re.compile(
             r"(IN[A-Z0-9]{10})\s+"
             r"(.*?)\s+"
@@ -105,60 +106,43 @@ class ExtractHoldings:
 
     def _resolve_nse_symbol(self, query: str, company_name: str):
         """
-        Query Finnhub for *query* and return the best-matching NSE symbol
-        and company name using string-similarity against *company_name*.
-
-        Returns (symbol, company_name) — unchanged if no good match found.
+        Query Stock table for *query* and return the preferred symbol
+        (NSE if available, otherwise BSE).
         """
-        symbol = query
+        query = str(query).strip().upper()
         try:
-            resp = requests.get(
-                f"https://finnhub.io/api/v1/search?q={query}&token={self.FINNHUB_TOKEN}"
-            )
-            if resp.status_code == 200:
-                results = resp.json().get("result", [])
-                best_match = None
-                best_ratio = 0.0
-                for res in results:
-                    sym_candidate = res.get("symbol", "")
-                    desc = res.get("description", "")
-                    if ".ns" in sym_candidate.lower():
-                        ratio = difflib.SequenceMatcher(
-                            None, str(company_name).lower(), str(desc).lower()
-                        ).ratio()
-                        if ratio > best_ratio:
-                            best_ratio = ratio
-                            best_match = res
-                if best_match and best_ratio > 0.6:
-                    company_name = best_match.get("description", company_name)
-                    symbol = best_match.get("symbol", symbol)
+            with db_handler.get_session() as session:
+                # Prefer exact match on symbol or ISIN
+                stock = session.exec(
+                    select(Stock).where(or_(Stock.nse_symbol == query, Stock.isin_code == query))
+                ).first()
+                if stock:
+                    # Prefer NSE symbol, fallback to BSE symbol
+                    preferred_symbol = stock.nse_symbol or stock.bse_symbol
+                    return preferred_symbol or query, stock.name or company_name
         except Exception as e:
-            print(f"[Finnhub/NSE] Error resolving {query}: {e}")
-        return symbol, company_name
+            print(f"[StockDB/NSE] Error resolving {query}: {e}")
+        return query, company_name
 
     def _resolve_bse_symbol(self, scrip_code: str, company_name: str):
         """
-        Query Finnhub for *scrip_code* and return the matching BSE symbol
-        (suffix .bo or .bs) and company name.
-
-        Returns (symbol, company_name) — scrip_code unchanged if no match.
+        Query Stock table for *scrip_code* and return the preferred symbol
+        (NSE if available, otherwise BSE).
         """
-        symbol = scrip_code
+        scrip_code = str(scrip_code).strip()
         try:
-            resp = requests.get(
-                f"https://finnhub.io/api/v1/search?q={scrip_code}&token={self.FINNHUB_TOKEN}"
-            )
-            if resp.status_code == 200:
-                results = resp.json().get("result", [])
-                for res in results:
-                    sym_candidate = res.get("symbol", "")
-                    if ".bo" in sym_candidate.lower() or ".bs" in sym_candidate.lower():
-                        company_name = res.get("description", company_name)
-                        symbol = res.get("symbol", symbol)
-                        break   # first BSE match is sufficient
+            with db_handler.get_session() as session:
+                # Scrip code is stored as bse_symbol (numeric 5xxxxx)
+                stock = session.exec(
+                    select(Stock).where(Stock.bse_symbol == scrip_code)
+                ).first()
+                if stock:
+                    # Prefer NSE symbol, fallback to BSE symbol
+                    preferred_symbol = stock.nse_symbol or stock.bse_symbol
+                    return preferred_symbol, stock.name or company_name
         except Exception as e:
-            print(f"[Finnhub/BSE] Error resolving {scrip_code}: {e}")
-        return symbol, company_name
+            print(f"[StockDB/BSE] Error resolving {scrip_code}: {e}")
+        return scrip_code, company_name
 
     def _expand_demerger_children(
         self, demerger: dict, common_fields: dict, symbol_key: str = "symbol"
@@ -273,16 +257,15 @@ class ExtractHoldings:
             df['holding_date'] = holding_date
             for index, row in df.iterrows():
                 try:
-                    resp = requests.get(
-                        f"https://finnhub.io/api/v1/search?q={row['ISIN Code']}&token={self.FINNHUB_TOKEN}"
-                    )
-                    if resp.status_code == 200 and resp.json().get('result'):
-                        result = resp.json()['result']
-                        if result:
-                            df.at[index, "Company Name"] = result[0]['description']
-                            df.at[index, "Symbol"]       = result[0]['symbol']
+                    isin = str(row['ISIN Code']).strip().upper()
+                    with db_handler.get_session() as session:
+                        stock = session.exec(select(Stock).where(Stock.isin_code == isin)).first()
+                        if stock:
+                            df.at[index, "Company Name"] = stock.name
+                            # Prefer NSE symbol, fallback to BSE symbol
+                            df.at[index, "Symbol"]       = stock.nse_symbol or stock.bse_symbol or stock.isin_code
                 except Exception as e:
-                    print(f"Error fetching company name: {e}")
+                    print(f"Error looking up stock from DB: {e}")
             df = df[['holding_date', 'Company Name', 'Symbol', 'Rate', 'Curr. Bal']]
             df.rename(columns={
                 'holding_date': 'timestamp', 'Company Name': 'company_name',
