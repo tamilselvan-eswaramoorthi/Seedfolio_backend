@@ -1,4 +1,5 @@
 import base64
+import logging
 from math import e
 import re
 import json
@@ -125,9 +126,26 @@ class GetHoldingsFromGmail:
     # Core incremental processing
     # ------------------------------------------------------------------
 
-    def _incremental_processing(self, extractions, email_date=None):
-        consolidated_transactions = []
+    def _process_extractions(self, extractions):
+        if not extractions:
+            return
+
+        transactions_to_add = []
+        holdings_cache = {} # Key: symbol, Value: holding object
+
         with db_handler.get_session() as session:
+            # 1. Pre-fetch existing holdings for all symbols involved to minimize DB hits
+            symbols = list(set(item.get("symbol").split(".")[0] for item in extractions if item.get("symbol")))
+            if symbols:
+                existing_holdings = session.exec(
+                    select(Holdings).where(
+                        Holdings.user_id == self.user_id,
+                        Holdings.stock_symbol.in_(symbols)
+                    )
+                ).all()
+                for h in existing_holdings:
+                    holdings_cache[h.stock_symbol] = h
+
             for item in extractions:
                 symbol = item.get("symbol")
                 transaction_type = item.get("transaction_type", "BUY").upper()
@@ -139,9 +157,13 @@ class GetHoldingsFromGmail:
                 except ValueError:
                     continue
 
-                trade_datetime = item.get("trade_datetime")
+                if qty <= 0 or rate <= 0:
+                    continue
 
-                # 1. Add Transaction to DB
+                trade_datetime = item.get("trade_datetime")
+                base_symbol = symbol.split(".")[0]
+
+                # 1. Add Transaction to list
                 transaction = Transaction(
                     transaction_id=str(uuid.uuid4()),
                     user_id=self.user_id,
@@ -150,20 +172,15 @@ class GetHoldingsFromGmail:
                     stock_name=item.get("company_name", ""),
                     transaction_type=transaction_type,
                     quantity=int(qty),
+                    broker=item.get("broker", ""),
                     exchange=item.get("exchange", ""),
                     price=rate
                 )
-                session.add(transaction)
+                transactions_to_add.append(transaction)
 
-                # 2. Update/Create Holding in DB
-                holding = session.exec(
-                    select(Holdings).where(
-                        Holdings.user_id == self.user_id,
-                        Holdings.stock_symbol == symbol.split(".")[0]
-                    )
-                ).first()
-
-                if holding:
+                # 2. Update/Create Holding in cache
+                if base_symbol in holdings_cache:
+                    holding = holdings_cache[base_symbol]
                     old_qty = holding.quantity
                     old_rate = holding.avg_buy
                     if transaction_type == "BUY":
@@ -184,24 +201,21 @@ class GetHoldingsFromGmail:
                     holding = Holdings(
                         holding_id=str(uuid.uuid4()),
                         user_id=self.user_id,
-                        stock_symbol=symbol.split(".")[0],
+                        stock_symbol=base_symbol,
                         company_name=item.get("company_name", ""),
                         quantity=int(qty) if transaction_type == "BUY" else -int(qty),
                         avg_buy=rate,
                         realized_pl=0.0,
                         holding_datetime=trade_datetime if trade_datetime else datetime.now()
                     )
-                session.add(holding)
+                    holdings_cache[base_symbol] = holding
 
-                consolidated_transactions.append({
-                    "company_name": item.get("company_name", ""),
-                    "symbol": symbol,
-                    "quantity": qty,
-                    "rate": rate,
-                    "timestamp": trade_datetime
-                })
+            # 3. Add all objects to session and commit once
+            for t in transactions_to_add:
+                session.add(t)
+            for h in holdings_cache.values():
+                session.add(h)
             session.commit()
-        return consolidated_transactions
 
     def fetch_incremental_nse_emails(self, after_timestamp_sec: int):
         if after_timestamp_sec is not None:
@@ -223,11 +237,15 @@ class GetHoldingsFromGmail:
             if not page_token:
                 break
         print (f"Found {len(nse_messages)} NSE emails to process incrementally.")
+        all_extractions = []
         if nse_messages:
             for index, nse_msg_ref in enumerate(nse_messages):
                 nse_msg = self.service.users().messages().get(userId="me", id=nse_msg_ref["id"]).execute() # type: ignore
                 nse_attachments = self.get_attachments_in_memory("me", nse_msg['id'], nse_msg.get("payload", {}))
-                
+
+                email_sent_time = nse_msg.get("internalDate")
+                email_sent_date = datetime.fromtimestamp(int(email_sent_time) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
                 for att in nse_attachments:
                     if str(att["filename"]).lower().endswith(".pdf"):
                         email_date = self._extract_nse_date(nse_msg)
@@ -235,9 +253,11 @@ class GetHoldingsFromGmail:
                             email_date = nse_msg.get("internalDate")
                             email_date = datetime.fromtimestamp(int(email_date) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
                         nse_holdings = self.extractor.extract_nse_pdf(att["data"], self.PASSWORD, email_date)
+
                         if nse_holdings is not None:
-                            self._incremental_processing(nse_holdings, email_date)
+                            all_extractions.extend(nse_holdings)
                 print (f"Processed NSE email {index + 1}/{len(nse_messages)}")
+        return all_extractions
 
     def fetch_incremental_bse_emails(self, after_timestamp_sec: int):
         bse_query = self.bse_query
@@ -247,30 +267,40 @@ class GetHoldingsFromGmail:
             bse_query = self.bse_query  
         
         page_token = None
-        nse_messages = []
+        bse_messages = []
         while True:
             bse_results = self.service.users().messages().list( # type: ignore
                 userId="me", q=bse_query, pageToken=page_token).execute()
 
             if "messages" in bse_results:
-                nse_messages.extend(bse_results["messages"])
+                bse_messages.extend(bse_results["messages"])
 
             page_token = bse_results.get("nextPageToken")
             if not page_token:
                 break
-        print (f"Found {len(nse_messages)} BSE emails to process incrementally.")
-        if nse_messages:
-            for index, nse_msg_ref in enumerate(nse_messages):
-                nse_msg = self.service.users().messages().get(userId="me", id=nse_msg_ref["id"]).execute() # type: ignore
-                nse_attachments = self.get_attachments_in_memory("me", nse_msg['id'], nse_msg.get("payload", {}))
-                
-                for att in nse_attachments:
+        print (f"Found {len(bse_messages)} BSE emails to process incrementally.")
+        all_extractions = []
+        if bse_messages:
+            for index, bse_msg_ref in enumerate(bse_messages):
+                bse_msg = self.service.users().messages().get(userId="me", id=bse_msg_ref["id"]).execute() # type: ignore
+                bse_attachments = self.get_attachments_in_memory("me", bse_msg['id'], bse_msg.get("payload", {}))
+
+                email_sent_time = bse_msg.get("internalDate")
+                email_sent_date = datetime.fromtimestamp(int(email_sent_time) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+                for att in bse_attachments:
                     if str(att["filename"]).lower().endswith(".pdf"):
                         extractions = self.extractor.extract_bse_pdf(att["data"], self.PASSWORD)
                         if extractions is not None:
-                            self._incremental_processing(extractions)
-                print (f"Processed BSE email {index + 1}/{len(nse_messages)}")
+                            all_extractions.extend(extractions)
+                print (f"Processed BSE email {index + 1}/{len(bse_messages)}")
+        return all_extractions
         
     def fetch_incremental_emails(self, after_timestamp_sec: int):
-        self.fetch_incremental_nse_emails(after_timestamp_sec)
-        self.fetch_incremental_bse_emails(after_timestamp_sec)
+        nse_extractions = self.fetch_incremental_nse_emails(after_timestamp_sec)
+        bse_extractions = self.fetch_incremental_bse_emails(after_timestamp_sec)
+        
+        all_extractions = nse_extractions + bse_extractions
+        logging.info(f"Total extractions from NSE and BSE emails: {len(all_extractions)}")
+        if all_extractions:
+            self._process_extractions(all_extractions)

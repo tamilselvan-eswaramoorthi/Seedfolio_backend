@@ -25,6 +25,7 @@ class Transaction(SQLModel, table=True):
     quantity: int = Field(default=0)
     price: float = Field(default=0.0)
     exchange: str = Field(default="", max_length=10) 
+    broker: str = Field(default="", max_length=50)
     commission_local: float = Field(default=0.0)
     user: Optional[User] = Relationship(back_populates="transactions")
 

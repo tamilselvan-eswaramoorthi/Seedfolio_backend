@@ -1,14 +1,3 @@
-"""
-corporate_actions.py
---------------------
-Handles corporate actions that change symbol-to-holding relationships:
-  - Demergers  (one symbol → multiple new symbols)
-  - Stock splits (1 share → N shares at 1/N price)
-  - Bonus issues (N additional shares credited per M held)
-
-Add new events to DEMERGER_REGISTRY / SPLIT_REGISTRY as they happen.
-"""
-
 from datetime import date
 from typing import Any, Dict, List, Optional
 
@@ -16,8 +5,13 @@ from typing import Any, Dict, List, Optional
 # DEMERGER REGISTRY
 # ---------------------------------------------------------------------------
 
-DEMERGER_REGISTRY: List[Dict[str, Any]] = [
+from datetime import date
+from typing import List, Dict, Any
 
+# ---------------------------------------------------------------------------
+# DEMERGER_REGISTRY
+# ---------------------------------------------------------------------------
+DEMERGER_REGISTRY: List[Dict[str, Any]] = [
     {
         "effective_date": date(2025, 1, 2),
         "original": "TATAMOTORS.NS",
@@ -35,10 +29,32 @@ DEMERGER_REGISTRY: List[Dict[str, Any]] = [
             {
                 "symbol": "TMCV.NS",
                 "bse_symbol": "TMCV.BO",
-                "company_name": "Tata Motors Commercial Vehicles",
+                "company_name": "Tata Motors Ltd",
                 "ratio": 1.0,
                 "price_ratio": 0.3115,      # 31.15 % of cost allocated here
                 "keep_original": False,
+            },
+        ],
+    },
+    {
+        "effective_date": date(2025, 1, 1),
+        "original": "ITC.NS",
+        "raw_symbol": "ITC",
+        "bse_scrip_code": "500875",
+        "children": [
+            {
+                "symbol": "ITCHOTELS.NS",
+                "company_name": "ITC Hotels Ltd",
+                "ratio": 0.1,               # 1 share for every 10 held
+                "price_ratio": 0.8649,
+                "keep_original": True,
+            },
+            {
+                "symbol": "ITC.NS",
+                "company_name": "ITC Ltd",
+                "ratio": 1,
+                "price_ratio": 0.1351,
+                "keep_original": True,
             },
         ],
     },
@@ -47,22 +63,17 @@ DEMERGER_REGISTRY: List[Dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 # STOCK SPLIT REGISTRY
 # ---------------------------------------------------------------------------
-# ratio > 1 means a split  (e.g. 1 share → 2 shares, ratio = 2)
-# ratio < 1 means a reverse-split (e.g. 10 shares → 1 share, ratio = 0.1)
 SPLIT_REGISTRY: List[Dict[str, Any]] = [
-    # Example:
-    # {"effective_date": date(2024, 3, 15), "symbol": "INFY.NS", "ratio": 2},
+    {"effective_date": date(2024, 10, 28), "symbol": "DRREDDY.NS", "ratio": 5},
 ]
 
 # ---------------------------------------------------------------------------
 # BONUS REGISTRY
 # ---------------------------------------------------------------------------
-# For every "per" shares held, "bonus" additional shares are credited.
 BONUS_REGISTRY: List[Dict[str, Any]] = [
-    # Example: 1 bonus share for every 2 held
-    # {"effective_date": date(2024, 6, 1), "symbol": "HDFCBANK.NS", "bonus": 1, "per": 2},
+    {"effective_date": date(2025, 8, 26), "symbol": "KARURVYSYA.NS", "bonus": 1, "per": 5},
+    {"effective_date": date(2025, 7, 18), "symbol": "MOTHERSON.NS", "bonus": 1, "per": 2},
 ]
-
 
 # ---------------------------------------------------------------------------
 # Helper: look up the demerger record that applies to a given symbol / date
@@ -91,7 +102,7 @@ def get_demerger_by_raw_symbol(raw_symbol: str, transaction_date: date) -> Optio
     """
     for record in DEMERGER_REGISTRY:
         if record.get("raw_symbol", "").upper() == raw_symbol.upper():
-            if transaction_date >= record["effective_date"]:
+            if transaction_date >= record["effective_date"]:    
                 return record
     return None
 

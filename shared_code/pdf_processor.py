@@ -168,12 +168,6 @@ class ExtractHoldings:
             child_row["company_name"] = child.get("company_name", common_fields["company_name"])
             child_row["quantity"]     = int(qty * child["ratio"])
             child_row["rate"]         = round(price * child["price_ratio"] / child["ratio"], 2)
-            print(
-                f"[Demerger-PreFinnhub/{common_fields['exchange']}] "
-                f"{common_fields.get('_raw', '?')} → {child_symbol} "
-                f"({child_row['company_name']}): "
-                f"qty={child_row['quantity']}, rate={child_row['rate']}"
-            )
             rows.append(child_row)
         return rows
 
@@ -300,6 +294,12 @@ class ExtractHoldings:
                 raw_symbol   = str(row['Symbol']).strip()
                 company_name = row.get('Name of the Security', raw_symbol)
                 buy_or_sell  = "BUY" if row['Buy/ Sell'] == "B" else "SELL"
+                broker_name = row.get('TM Name', '').strip()                
+                if "GROWW" in broker_name.upper():
+                    broker_name = "Groww"
+                elif "ZERODHA" in broker_name.upper():
+                    broker_name = "Zerodha"
+
                 try:
                     quantity = int(row['Quantity'])
                 except (ValueError, TypeError):
@@ -307,7 +307,6 @@ class ExtractHoldings:
                 price          = row['Price (Rs.)']
                 trade_datetime = self._parse_trade_datetime(email_date, row['Trade Time'], nse_fixed_fmt=True)
 
-                # ── Pre-Finnhub: demerger check ───────────────────────────
                 early_demerger = get_demerger_by_raw_symbol(raw_symbol, check_date)
                 if early_demerger:
                     common = {
@@ -317,12 +316,12 @@ class ExtractHoldings:
                         "trade_datetime":   trade_datetime,
                         "transaction_type": buy_or_sell,
                         "exchange":         "NSE",
-                        "_raw":             raw_symbol,   # for logging only
+                        "_raw":             raw_symbol,
+                        "broker":           broker_name,
                     }
                     rows.extend(self._expand_demerger_children(early_demerger, common, symbol_key="symbol"))
-                    continue  # skip Finnhub
+                    continue 
 
-                # ── Normal path: Finnhub symbol resolution ────────────────
                 symbol, company_name = self._resolve_nse_symbol(raw_symbol, company_name)
                 base_row = {
                     "company_name":     company_name,
@@ -332,6 +331,7 @@ class ExtractHoldings:
                     "trade_datetime":   trade_datetime,
                     "transaction_type": buy_or_sell,
                     "exchange":         "NSE",
+                    'broker':           broker_name,
                 }
                 rows.extend(self._expand_corporate_actions(base_row, email_date))
 
@@ -362,7 +362,7 @@ class ExtractHoldings:
         rows = []
         for _, row in final_df.iterrows():
             try:
-                if not str(row.get('Scrip Name', '')).strip():
+                if not str(row.get('Scrip Name', '')).strip() and not str(row.get('Qty', '')).strip():
                     continue
 
                 company_name = str(row['Scrip Name']).replace('\n', ' ').strip()
@@ -376,7 +376,6 @@ class ExtractHoldings:
                 trade_datetime = self._parse_trade_datetime(row['Trade Date'], row['Trade Time'])
                 bse_trade_date = self._parse_date_str(row['Trade Date'])
 
-                # ── Pre-Finnhub: demerger check ───────────────────────────
                 early_demerger = get_demerger_by_bse_code(scrip_code, bse_trade_date)
                 if early_demerger:
                     common = {
@@ -389,9 +388,8 @@ class ExtractHoldings:
                         "_raw":             scrip_code,   # for logging only
                     }
                     rows.extend(self._expand_demerger_children(early_demerger, common, symbol_key="bse_symbol"))
-                    continue  # skip Finnhub
+                    continue  
 
-                # ── Normal path: Finnhub symbol resolution ────────────────
                 symbol, company_name = self._resolve_bse_symbol(scrip_code, company_name)
                 base_row = {
                     "company_name":     company_name,
