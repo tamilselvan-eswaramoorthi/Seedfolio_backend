@@ -1,8 +1,6 @@
 import logging
 import json
-import uuid
-import math
-from datetime import datetime, timezone
+from datetime import timezone
 import azure.functions as func
 
 from sqlmodel import select
@@ -35,5 +33,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             status_code=200
         )
     except Exception as e:
-        logging.error(str(e))
+        import traceback
+        traceback_str = traceback.format_exc()
+        logging.error(traceback_str)
         return func.HttpResponse(f"Error: {str(e)}", status_code=500)

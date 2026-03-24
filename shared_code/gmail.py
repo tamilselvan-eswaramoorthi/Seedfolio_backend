@@ -1,13 +1,11 @@
 import base64
-import logging
-from math import e
 import re
 import json
-import time
 import uuid
-from datetime import datetime, timezone
-
+import yfinance as yf
 from sqlmodel import select
+
+from datetime import datetime, timezone, timedelta
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -15,7 +13,7 @@ from googleapiclient.discovery import build
 
 from shared_code.pdf_processor import ExtractHoldings
 from shared_code.database import db_handler
-from shared_code.models import GoogleOAuthToken, User, Holdings, Transaction
+from shared_code.models import GoogleOAuthToken, User, Holdings, Transaction, Stock
 
 class GetHoldingsFromGmail:
     def __init__(self, user_id: str):
@@ -26,6 +24,7 @@ class GetHoldingsFromGmail:
         self._get_user_details()
         self.authenticate()
         self.zerodha_query = "from:no-reply-transaction-with-holding-statement@reportsmailer.zerodha.net"
+        self.cas_query = "from:eCAS@cdslstatement.com"
         self.nse_query = "from:nse-direct@nse.co.in"
         self.bse_query = "from:mgrpt@bseindia.com"
 
@@ -105,6 +104,29 @@ class GetHoldingsFromGmail:
                 text += self._get_body_text(part)
         return text
 
+    def _get_full_body_text(self, payload):
+        text = ""
+        if 'body' in payload and 'data' in payload['body']:
+            try:
+                text = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="ignore")
+            except:
+                pass
+        elif 'parts' in payload:
+            for part in payload['parts']:
+                text += self._get_full_body_text(part)
+        return text
+
+    def _detect_broker_from_email(self, msg):
+        payload = msg.get("payload", {})
+        body_text = self._get_full_body_text(payload).lower()
+        if "zerodha" in body_text:
+            return "Zerodha"
+        if "groww" in body_text:
+            return "Groww"
+        if "angleone" in body_text or "angelone" in body_text:
+            return "AngelOne"
+        return None
+
     def _extract_nse_date(self, msg):
         payload = msg.get('payload', {})
         full_text = self._get_body_text(payload)
@@ -126,9 +148,9 @@ class GetHoldingsFromGmail:
     # Core incremental processing
     # ------------------------------------------------------------------
 
-    def _process_extractions(self, extractions):
+    def _calculate_holdings(self, extractions):
         if not extractions:
-            return
+            return [], []
 
         transactions_to_add = []
         holdings_cache = {} # Key: symbol, Value: holding object
@@ -140,7 +162,7 @@ class GetHoldingsFromGmail:
                 existing_holdings = session.exec(
                     select(Holdings).where(
                         Holdings.user_id == self.user_id,
-                        Holdings.stock_symbol.in_(symbols)
+                        Holdings.stock_symbol.in_(symbols) # type: ignore
                     )
                 ).all()
                 for h in existing_holdings:
@@ -155,9 +177,6 @@ class GetHoldingsFromGmail:
                     qty = float(str(item.get("quantity", 0)).replace(",", ""))
                     rate = float(str(item.get("rate", 0)).replace(",", ""))
                 except ValueError:
-                    continue
-
-                if qty <= 0 or rate <= 0:
                     continue
 
                 trade_datetime = item.get("trade_datetime")
@@ -210,12 +229,38 @@ class GetHoldingsFromGmail:
                     )
                     holdings_cache[base_symbol] = holding
 
-            # 3. Add all objects to session and commit once
-            for t in transactions_to_add:
+        return transactions_to_add, list(holdings_cache.values())
+
+    def _upload_extractions(self, transactions, holdings):
+        if not transactions and not holdings:
+            return
+
+        with db_handler.get_session() as session:
+            # Add all objects to session and commit once
+            for t in transactions:
                 session.add(t)
-            for h in holdings_cache.values():
+            for h in holdings:
                 session.add(h)
             session.commit()
+
+    def fetch_cas_details(self, after_timestamp_sec: int):
+        if after_timestamp_sec is not None:
+            cas_query = f"{self.cas_query} after:{after_timestamp_sec}"
+        else:
+            cas_query = self.cas_query
+        print(f"\nQuerying CAS emails incrementally with: {cas_query}")
+
+        cas_results = self.service.users().messages().list( # type: ignore
+            userId="me", q=cas_query, maxResults=1).execute()
+        holdings = None
+        if "messages" in cas_results and cas_results["messages"]:
+            cas_msg_ref = cas_results["messages"][0]
+            cas_msg = self.service.users().messages().get(userId="me", id=cas_msg_ref["id"]).execute() # type: ignore
+            cas_attachments = self.get_attachments_in_memory("me", cas_msg['id'], cas_msg.get("payload", {}))
+            for att in cas_attachments:
+                if str(att["filename"]).lower().endswith(".pdf"):
+                    holdings = self.extractor.extract_cas_pdf(att["data"], self.PASSWORD)
+        return holdings
 
     def fetch_incremental_nse_emails(self, after_timestamp_sec: int):
         if after_timestamp_sec is not None:
@@ -288,19 +333,122 @@ class GetHoldingsFromGmail:
                 email_sent_time = bse_msg.get("internalDate")
                 email_sent_date = datetime.fromtimestamp(int(email_sent_time) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
 
+                broker_name = self._detect_broker_from_email(bse_msg)
                 for att in bse_attachments:
                     if str(att["filename"]).lower().endswith(".pdf"):
-                        extractions = self.extractor.extract_bse_pdf(att["data"], self.PASSWORD)
+                        extractions = self.extractor.extract_bse_pdf(att["data"], self.PASSWORD, broker_name)
                         if extractions is not None:
                             all_extractions.extend(extractions)
                 print (f"Processed BSE email {index + 1}/{len(bse_messages)}")
         return all_extractions
         
+    def _fill_missing_transactions(self, extractions, cas_holdings):
+        """ For each holding in CAS, find the corresponding extractions and group by broker """
+        statement_date = cas_holdings['statement_date']
+        statement_date = datetime.strptime(statement_date, "%d-%m-%Y").date()
+        ret_extractions = extractions[:]
+        for broker, holdings in cas_holdings.items():
+            if broker in ["mutual_funds", "statement_date", "transactions", "other"]:
+                continue
+            for holding in holdings:
+                matched_extractions = []
+                company_name = None
+                symbol = None
+                for e in extractions:
+                    if holding['isin'].lower() == e['isin'].lower():
+                        company_name = e['company_name']
+                        symbol = e['symbol']
+                        if 'broker' in e:
+                            broker_name = e['broker'].lower()
+                            trade_date = e['trade_datetime']
+                            if isinstance(trade_date, str):
+                                trade_dt = datetime.strptime(trade_date, "%Y-%m-%d").date()
+                            else:
+                                trade_dt = trade_date.date()
+                            if trade_dt <= statement_date:
+                                if broker_name == broker:
+                                    matched_extractions.append(e)
+                        else:
+                            print (f"Extraction without broker info: {e}")
+                
+                qty_ext = sum(e['quantity'] if e['transaction_type'] == 'BUY' else -e['quantity'] for e in matched_extractions)
+                cost_ext = sum(float(e['rate']) * e['quantity'] if e['transaction_type'] == 'BUY' else -float(e['rate']) * e['quantity'] for e in matched_extractions)
+                
+                qty_diff = holding['free_bal'] - qty_ext
+                
+                if abs(qty_diff) > 0.01:
+                    mkt_price = holding.get('market_price')
+                    if not mkt_price and holding.get('value') and holding.get('free_bal'):
+                        mkt_price = float(holding['value']) / float(holding['free_bal'])
+                    
+                    # Calculate profit contributed by known extractions
+                    known_profit = 0
+                    for e in matched_extractions:
+                        p = (mkt_price - float(e['rate'])) * (e['quantity'] if e['transaction_type'] == 'BUY' else -e['quantity'])
+                        known_profit += p
+
+                    
+                    value_diff = holding['value'] - cost_ext
+                    missing_profit = value_diff - known_profit
+
+                    approx_rate = mkt_price - (missing_profit / qty_diff)
+
+                    # Use yfinance to find the nearest date
+                    if symbol:
+                        ticker_symbol = f"{symbol}.NS"
+                        try:
+                            # Find first transaction date or go back 1 year
+                            start_dt = statement_date - timedelta(days=365)
+                            if matched_extractions:
+                                for e in matched_extractions:
+                                    if isinstance(e['trade_datetime'], str):
+                                        e['trade_datetime'] = datetime.strptime(e['trade_datetime'], "%Y-%m-%d")
+                                first_trade = min(e['trade_datetime'].date() for e in matched_extractions)
+                                start_dt = min(start_dt, first_trade)
+
+                            hist = yf.download(ticker_symbol, start=start_dt, end=statement_date + timedelta(days=1), progress=False)
+                            if hist is not None and not hist.empty:
+                                # Find date where Close is closest to approx_rate
+                                hist['diff'] = (hist['Close'] - approx_rate).abs()
+                                best_match_date = hist['diff'].idxmin()
+                                best_match_price = hist.loc[best_match_date, 'Close'].values if best_match_date in hist.index else approx_rate
+                                
+                                print (best_match_price)
+
+                                inferred_transaction = {
+                                    'company_name': company_name,
+                                    'symbol': symbol,
+                                    'isin': holding['isin'],
+                                    'rate': round(float(best_match_price), 2),
+                                    'quantity': abs(qty_diff),
+                                    'trade_datetime': best_match_date.strftime("%Y-%m-%d %H:%M:%S%z"), # type: ignore
+                                    'transaction_type': "BUY" if qty_diff > 0 else "SELL",
+                                    'exchange': 'NSE',
+                                    'broker': broker,
+                                    'is_inferred': True
+                                }
+                                print(f"  Inferred Transaction: {inferred_transaction}")
+                                ret_extractions.append(inferred_transaction)
+                        except Exception as ex:
+                            import traceback
+                            traceback_str = traceback.format_exc()
+                            print(traceback_str)
+                            print(f"  Error fetching data for {ticker_symbol}: {ex}")
+        return ret_extractions
+                    
     def fetch_incremental_emails(self, after_timestamp_sec: int):
+        cas_holdings = self.fetch_cas_details(after_timestamp_sec)
         nse_extractions = self.fetch_incremental_nse_emails(after_timestamp_sec)
         bse_extractions = self.fetch_incremental_bse_emails(after_timestamp_sec)
         
         all_extractions = nse_extractions + bse_extractions
-        logging.info(f"Total extractions from NSE and BSE emails: {len(all_extractions)}")
+        
+        if cas_holdings:
+            all_extractions = self._fill_missing_transactions(all_extractions, cas_holdings)
+
         if all_extractions:
-            self._process_extractions(all_extractions)
+            # 1. Calculate holdings and transactions
+            transactions, holdings = self._calculate_holdings(all_extractions)
+
+            # # 2. Upload to database
+            self._upload_extractions(transactions, holdings)

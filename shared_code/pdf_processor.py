@@ -10,7 +10,7 @@ from shared_code.corporate_actions import (
 )
 from shared_code.database import db_handler
 from shared_code.models import Stock
-
+from shared_code.casparser import CASParser
 
 
 class ExtractHoldings:
@@ -106,10 +106,9 @@ class ExtractHoldings:
 
     def _resolve_nse_symbol(self, query: str, company_name: str):
         """
-        Query Stock table for *query* and return the preferred symbol
-        (NSE if available, otherwise BSE).
+        Query Stock table for *query* and return (preferred_symbol, name, isin).
         """
-        query = str(query).strip().upper()
+        query = str(query).strip().upper().split('.')[0].split()[0]
         try:
             with db_handler.get_session() as session:
                 # Prefer exact match on symbol or ISIN
@@ -119,15 +118,14 @@ class ExtractHoldings:
                 if stock:
                     # Prefer NSE symbol, fallback to BSE symbol
                     preferred_symbol = stock.nse_symbol or stock.bse_symbol
-                    return preferred_symbol or query, stock.name or company_name
+                    return preferred_symbol or query, stock.name or company_name, stock.isin_code
         except Exception as e:
             print(f"[StockDB/NSE] Error resolving {query}: {e}")
-        return query, company_name
+        return query, company_name, None
 
     def _resolve_bse_symbol(self, scrip_code: str, company_name: str):
         """
-        Query Stock table for *scrip_code* and return the preferred symbol
-        (NSE if available, otherwise BSE).
+        Query Stock table for *scrip_code* and return (preferred_symbol, name, isin).
         """
         scrip_code = str(scrip_code).strip()
         try:
@@ -139,33 +137,34 @@ class ExtractHoldings:
                 if stock:
                     # Prefer NSE symbol, fallback to BSE symbol
                     preferred_symbol = stock.nse_symbol or stock.bse_symbol
-                    return preferred_symbol, stock.name or company_name
+                    return preferred_symbol, stock.name or company_name, stock.isin_code
         except Exception as e:
             print(f"[StockDB/BSE] Error resolving {scrip_code}: {e}")
-        return scrip_code, company_name
+        return scrip_code, company_name, None
 
-    def _expand_demerger_children(
-        self, demerger: dict, common_fields: dict, symbol_key: str = "symbol"
-    ) -> list:
+    def _expand_demerger_children(self, demerger: dict, common_fields: dict) -> list:
         """
         Convert one demerger registry entry into a list of child row dicts.
-
-        Parameters
-        ----------
-        demerger      : entry from DEMERGER_REGISTRY
-        common_fields : dict with company_name, quantity, rate, trade_datetime,
-                        transaction_type, exchange already populated
-        symbol_key    : which child field to use as the output symbol
-                        ("symbol" for NSE, "bse_symbol" for BSE — falls back to "symbol")
         """
         rows = []
         qty   = common_fields["quantity"]
         price = float(common_fields["rate"])
         for child in demerger["children"]:
-            child_symbol = child.get(symbol_key) or child["symbol"]
+            child_symbol = child["symbol"]
             child_row = dict(common_fields)
-            child_row["symbol"]       = child_symbol
-            child_row["company_name"] = child.get("company_name", common_fields["company_name"])
+            
+            # Resolve the child symbol to get formal name and ISIN
+            if common_fields.get("exchange") == "NSE":
+                res_sym, res_name, res_isin = self._resolve_nse_symbol(child_symbol, child.get("company_name", ""))
+            else:
+                if str(child_symbol).isdigit():
+                    res_sym, res_name, res_isin = self._resolve_bse_symbol(child_symbol, child.get("company_name", ""))
+                else:
+                    res_sym, res_name, res_isin = self._resolve_nse_symbol(child_symbol, child.get("company_name", ""))
+
+            child_row["symbol"]       = res_sym
+            child_row["company_name"] = res_name
+            child_row["isin"]         = res_isin
             child_row["quantity"]     = int(qty * child["ratio"])
             child_row["rate"]         = round(price * child["price_ratio"] / child["ratio"], 2)
             rows.append(child_row)
@@ -206,6 +205,7 @@ class ExtractHoldings:
                 bonus_row = dict(row)
                 bonus_row["quantity"] = bonus_qty
                 bonus_row["rate"]     = 0.0
+                bonus_row['description'] = "bonus"
                 print(f"[Bonus] {symbol}: +{bonus_qty} bonus shares at rate=0")
                 return [row, bonus_row]
 
@@ -260,12 +260,15 @@ class ExtractHoldings:
                             df.at[index, "Symbol"]       = stock.nse_symbol or stock.bse_symbol or stock.isin_code
                 except Exception as e:
                     print(f"Error looking up stock from DB: {e}")
-            df = df[['holding_date', 'Company Name', 'Symbol', 'Rate', 'Curr. Bal']]
+            df = df[['holding_date', 'Company Name', 'Symbol', 'Rate', 'Curr. Bal', 'ISIN Code']]
             df.rename(columns={
                 'holding_date': 'timestamp', 'Company Name': 'company_name',
-                'Symbol': 'symbol', 'Rate': 'rate', 'Curr. Bal': 'quantity'
+                'Symbol': 'symbol', 'Rate': 'rate', 'Curr. Bal': 'quantity',
+                'ISIN Code': 'isin'
             }, inplace=True)
-            return df.to_dict(orient="records")
+            res = df.to_dict(orient="records")
+            # Filter out entries where quantity or rate is 0 or None
+            return [r for r in res if r.get('quantity') and r.get('rate')]
         return None
 
     def extract_nse_pdf(self, pdf_source, password, email_date=None):
@@ -316,16 +319,16 @@ class ExtractHoldings:
                         "trade_datetime":   trade_datetime,
                         "transaction_type": buy_or_sell,
                         "exchange":         "NSE",
-                        "_raw":             raw_symbol,
                         "broker":           broker_name,
                     }
-                    rows.extend(self._expand_demerger_children(early_demerger, common, symbol_key="symbol"))
+                    rows.extend(self._expand_demerger_children(early_demerger, common))
                     continue 
 
-                symbol, company_name = self._resolve_nse_symbol(raw_symbol, company_name)
+                symbol, company_name, isin = self._resolve_nse_symbol(raw_symbol, company_name)
                 base_row = {
                     "company_name":     company_name,
                     "symbol":           symbol,
+                    "isin":             isin,
                     "rate":             price,
                     "quantity":         quantity,
                     "trade_datetime":   trade_datetime,
@@ -338,9 +341,10 @@ class ExtractHoldings:
             except Exception as e:
                 print(f"[NSE] Error processing row: {e}")
 
+        rows = self._filter_rows(rows)
         return rows
 
-    def extract_bse_pdf(self, pdf_source, password):
+    def extract_bse_pdf(self, pdf_source, password, broker_name=None):
         """Extract trade rows from a BSE contract note PDF."""
         doc = self._open_doc(pdf_source, password)
         all_tables = []
@@ -385,24 +389,44 @@ class ExtractHoldings:
                         "trade_datetime":   trade_datetime,
                         "transaction_type": buy_or_sell,
                         "exchange":         "BSE",
-                        "_raw":             scrip_code,   # for logging only
+                        "broker":           broker_name
                     }
-                    rows.extend(self._expand_demerger_children(early_demerger, common, symbol_key="bse_symbol"))
+                    rows.extend(self._expand_demerger_children(early_demerger, common))
                     continue  
 
-                symbol, company_name = self._resolve_bse_symbol(scrip_code, company_name)
+                symbol, company_name, isin = self._resolve_bse_symbol(scrip_code, company_name)
                 base_row = {
                     "company_name":     company_name,
                     "symbol":           symbol,
+                    "isin":             isin,
                     "rate":             price,
                     "quantity":         quantity,
                     "trade_datetime":   trade_datetime,
                     "transaction_type": buy_or_sell,
                     "exchange":         "BSE",
+                    "broker":           broker_name,
                 }
                 rows.extend(self._expand_corporate_actions(base_row, None))
 
             except Exception as e:
                 print(f"[BSE] Error processing row: {e}")
-
+                
+        rows = self._filter_rows(rows)
         return rows
+
+    def _filter_rows(self, rows):
+        filtered = []
+        for r in rows:
+            if 'description' in r and r['description'] == 'bonus':
+                print(f"Including bonus row: {r}")
+                filtered.append(r)
+            elif r.get('quantity') and r.get('rate'):
+                filtered.append(r)
+            else:
+               print(f"Filtering out row with missing quantity or rate: {r}")
+        return filtered
+
+    def extract_cas_pdf(self, pdf_source, password):
+        doc = self._open_doc(pdf_source, password)
+        all_holding = CASParser(doc).run()
+        return all_holding
