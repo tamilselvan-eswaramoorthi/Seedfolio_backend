@@ -13,7 +13,7 @@ from googleapiclient.discovery import build
 
 from shared_code.pdf_processor import ExtractHoldings
 from shared_code.database import db_handler
-from shared_code.models import GoogleOAuthToken, User, Holdings, Transaction, Stock
+from shared_code.models import GoogleOAuthToken, User, Holdings, Transaction, IPO
 
 class GetHoldingsFromGmail:
     def __init__(self, user_id: str):
@@ -148,15 +148,42 @@ class GetHoldingsFromGmail:
     # Core incremental processing
     # ------------------------------------------------------------------
 
+    def _fetch_ipo_price(self, isin: str) -> float:
+        with db_handler.get_session() as session:
+            ipo_detail = session.exec(
+                        select(IPO).where(
+                            IPO.isin_code == isin
+                        )
+                    ).first()
+            if ipo_detail:
+                return ipo_detail.offer_price, ipo_detail.ipo_listing_date
+        return 0, None # type: ignore
+
     def _calculate_holdings(self, extractions):
         if not extractions:
             return [], []
+
+        # 1. Sort transactions by date to ensure proper order (e.g., IPO allotment before sell)
+        def get_dt(item):
+            dt = item.get("trade_datetime")
+            if not dt:
+                return datetime.min.replace(tzinfo=timezone.utc)
+            if isinstance(dt, str):
+                try:
+                    return datetime.fromisoformat(dt.replace("Z", "+00:00")).replace(tzinfo=timezone.utc)
+                except:
+                    return datetime.min.replace(tzinfo=timezone.utc)
+            if isinstance(dt, datetime) and dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt
+
+        extractions.sort(key=get_dt)
 
         transactions_to_add = []
         holdings_cache = {} # Key: symbol, Value: holding object
 
         with db_handler.get_session() as session:
-            # 1. Pre-fetch existing holdings for all symbols involved to minimize DB hits
+            # 2. Pre-fetch existing holdings for all symbols involved to minimize DB hits
             symbols = list(set(item.get("symbol").split(".")[0] for item in extractions if item.get("symbol")))
             if symbols:
                 existing_holdings = session.exec(
@@ -170,11 +197,12 @@ class GetHoldingsFromGmail:
 
             for item in extractions:
                 symbol = item.get("symbol")
+                isin = item.get('isin')
                 transaction_type = item.get("transaction_type", "BUY").upper()
                 if not symbol:
                     continue
                 try:
-                    qty = float(str(item.get("quantity", 0)).replace(",", ""))
+                    qty_val = float(str(item.get("quantity", 0)).replace(",", ""))
                     rate = float(str(item.get("rate", 0)).replace(",", ""))
                 except ValueError:
                     continue
@@ -182,7 +210,7 @@ class GetHoldingsFromGmail:
                 trade_datetime = item.get("trade_datetime")
                 base_symbol = symbol.split(".")[0]
 
-                # 1. Add Transaction to list
+                # 3. Add Transaction to list
                 transaction = Transaction(
                     transaction_id=str(uuid.uuid4()),
                     user_id=self.user_id,
@@ -190,44 +218,77 @@ class GetHoldingsFromGmail:
                     stock_symbol=symbol,
                     stock_name=item.get("company_name", ""),
                     transaction_type=transaction_type,
-                    quantity=int(qty),
+                    quantity=int(qty_val),
                     broker=item.get("broker", ""),
                     exchange=item.get("exchange", ""),
                     price=rate
                 )
                 transactions_to_add.append(transaction)
 
-                # 2. Update/Create Holding in cache
+                # 4. Update/Create Holding in cache
                 if base_symbol in holdings_cache:
                     holding = holdings_cache[base_symbol]
                     old_qty = holding.quantity
                     old_rate = holding.avg_buy
                     if transaction_type == "BUY":
-                        new_qty = old_qty + int(qty)
-                        new_rate = ((old_qty * old_rate) + (int(qty) * rate)) / new_qty if new_qty > 0 else 0
+                        new_qty = old_qty + int(qty_val)
+                        new_rate = ((old_qty * old_rate) + (int(qty_val) * rate)) / new_qty if new_qty > 0 else 0
                         holding.quantity = new_qty
                         holding.avg_buy = float(f"{new_rate:.2f}")
                     elif transaction_type == "SELL":
-                        new_qty = old_qty - int(qty)
-                        realized_pl = (rate - old_rate) * int(qty)
+                        new_qty = old_qty - int(qty_val)
+                        realized_pl = (rate - old_rate) * int(qty_val)
+                        transaction.realized_pl = float(f"{realized_pl:.2f}")
                         holding.quantity = new_qty
-                        holding.realized_pl = (
-                            holding.realized_pl + realized_pl if holding.realized_pl else realized_pl
-                        )
+                        holding.realized_pl = float(f"{(holding.realized_pl + realized_pl):.2f}")
+
                     if trade_datetime:
                         holding.holding_datetime = trade_datetime
                 else:
+                    # For a new stock (e.g., IPO BUY), or a SELL with no history
+                    if transaction_type == "BUY":
+                        holding_qty = int(qty_val)
+                        realized_pl = 0.0
+                        avg_buy = float(f"{rate:.2f}")
+                    else:
+                        # SELL without history - check if it's an IPO or missing history
+                        ipo_price, listing_date = self._fetch_ipo_price(isin)
+                        if ipo_price > 0:
+                            realized_pl = (rate - ipo_price) * int(qty_val)
+                            avg_buy = ipo_price
+                            ipo_transaction = Transaction(
+                                transaction_id=str(uuid.uuid4()),
+                                user_id=self.user_id,
+                                transaction_datetime=listing_date,
+                                stock_symbol=symbol,
+                                stock_name=item.get("company_name", ""),
+                                transaction_type='BUY',
+                                quantity=int(qty_val),
+                                broker=item.get("broker", ""),
+                                exchange=item.get("exchange", ""),
+                                price=ipo_price
+                            )
+                            transactions_to_add.append(ipo_transaction)
+
+                        else:
+                            # If no IPO price found, fallback to 0 gain or total value as gain
+                            realized_pl = 0.0 
+                            avg_buy = rate
+                        
+                        holding_qty = -int(qty_val) # Negative quantity if we only have the sell
+
                     holding = Holdings(
                         holding_id=str(uuid.uuid4()),
                         user_id=self.user_id,
                         stock_symbol=base_symbol,
                         company_name=item.get("company_name", ""),
-                        quantity=int(qty) if transaction_type == "BUY" else -int(qty),
-                        avg_buy=rate,
-                        realized_pl=0.0,
+                        quantity=holding_qty,
+                        avg_buy=avg_buy,
+                        realized_pl=realized_pl,
                         holding_datetime=trade_datetime if trade_datetime else datetime.now()
                     )
                     holdings_cache[base_symbol] = holding
+
 
         return transactions_to_add, list(holdings_cache.values())
 

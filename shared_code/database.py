@@ -2,7 +2,7 @@ import urllib.parse
 from sqlmodel import create_engine, Session, SQLModel
 from sqlalchemy.pool import QueuePool
 from config import Config
-from shared_code.models import User, Transaction, Holdings, GoogleOAuthToken, Stock
+from shared_code.models import User, Transaction, Holdings, GoogleOAuthToken, Stock, IPO
 
 class Database:
     def __init__(self):
@@ -30,5 +30,10 @@ class Database:
 
     def get_session(self):
         return Session(self.engine)
+    
+    def bulk_save(self, records):
+        with self.get_session() as session:
+            session.bulk_save_objects(records)
+            session.commit()
 
 db_handler = Database()

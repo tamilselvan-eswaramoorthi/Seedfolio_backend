@@ -27,6 +27,7 @@ class Transaction(SQLModel, table=True):
     exchange: str = Field(default="", max_length=10) 
     broker: str = Field(default="", max_length=50)
     commission_local: float = Field(default=0.0)
+    realized_pl: float = Field(default=0.0)
     user: Optional[User] = Relationship(back_populates="transactions")
 
 class Holdings(SQLModel, table=True):
@@ -60,4 +61,14 @@ class Stock(SQLModel, table=True):
     nse_symbol: Optional[str] = Field(default=None, index=True, max_length=50)
     bse_symbol: Optional[str] = Field(default=None, index=True, max_length=50)
     type: str = Field(default="stock", max_length=20, index=True)
+    last_updated: datetime = Field(default_factory=datetime.now, nullable=False)
+
+class IPO(SQLModel, table=True):
+    id: int = Field(primary_key=True, max_length=36)
+    company_name: str = Field(max_length=255)
+    nse_symbol: Optional[str] = Field(default=None, index=True, max_length=50)
+    bse_symbol: Optional[str] = Field(default=None, index=True, max_length=50)
+    isin_code: Optional[str] = Field(default=None, index=True, max_length=20)
+    offer_price: Optional[float] = Field(default=None)
+    ipo_listing_date: Optional[datetime] = Field(default=None)
     last_updated: datetime = Field(default_factory=datetime.now, nullable=False)
