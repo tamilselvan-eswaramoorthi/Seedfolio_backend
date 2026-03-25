@@ -5,7 +5,7 @@ import azure.functions as func
 
 from sqlmodel import select
 from shared_code.database import db_handler
-from shared_code.models import Holdings
+from shared_code.models import Transaction
 from shared_code.gmail import GetHoldingsFromGmail
 from sqlalchemy import func as sa_func
 from shared_code.auth_decorator import auth_required
@@ -18,8 +18,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         with db_handler.get_session() as session:
             # Find max date
-            max_date = session.query(sa_func.max(Holdings.holding_datetime)).filter(Holdings.user_id == user_id).scalar()
-            
+            max_date = session.query(sa_func.max(Transaction.transaction_datetime)).filter(Transaction.user_id == user_id).scalar()
+
             if max_date is not None:
 
                 max_date = int(max_date.replace(tzinfo=timezone.utc).timestamp())
@@ -28,7 +28,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             gmail_client.fetch_incremental_emails(max_date)
 
         return func.HttpResponse(
-            body=json.dumps({"message": f"Successfully synchronized NSE and BSE holdings for user {user_id}."}),
+            body=json.dumps({"message": f"Successfully synchronized NSE and BSE transactions for user {user_id}."}),
             mimetype="application/json",
             status_code=200
         )
