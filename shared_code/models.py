@@ -28,6 +28,7 @@ class Transaction(SQLModel, table=True):
     broker: str = Field(default="", max_length=50)
     commission_local: float = Field(default=0.0)
     realized_pl: float = Field(default=0.0)
+    inferred: bool = Field(default=False)
     user: Optional[User] = Relationship(back_populates="transactions")
 
 class Holdings(SQLModel, table=True):

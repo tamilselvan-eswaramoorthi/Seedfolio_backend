@@ -221,7 +221,8 @@ class GetHoldingsFromGmail:
                     quantity=int(qty_val),
                     broker=item.get("broker", ""),
                     exchange=item.get("exchange", ""),
-                    price=rate
+                    price=rate,
+                    inferred=item.get("is_inferred", False)
                 )
                 transactions_to_add.append(transaction)
 
@@ -266,7 +267,8 @@ class GetHoldingsFromGmail:
                                 quantity=int(qty_val),
                                 broker=item.get("broker", ""),
                                 exchange=item.get("exchange", ""),
-                                price=ipo_price
+                                price=ipo_price,
+                                inferred=True
                             )
                             transactions_to_add.append(ipo_transaction)
 
@@ -474,8 +476,6 @@ class GetHoldingsFromGmail:
                                 best_match_date = hist['diff'].idxmin()
                                 best_match_price = hist.loc[best_match_date, 'Close'].values if best_match_date in hist.index else approx_rate
                                 
-                                print (best_match_price)
-
                                 inferred_transaction = {
                                     'company_name': company_name,
                                     'symbol': symbol,
