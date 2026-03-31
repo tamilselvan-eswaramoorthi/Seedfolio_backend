@@ -1,0 +1,26 @@
+# Default ignore
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.db
+db.sqlite3
+
+# Local settings and data
+local.settings.json
+.env
+stock_cache/
+*.log
+
+# Git files
+.git/
+.gitignore
+
+# VS Code
+.vscode/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

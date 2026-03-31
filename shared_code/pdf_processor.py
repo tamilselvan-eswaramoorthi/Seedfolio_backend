@@ -8,8 +8,7 @@ from shared_code.corporate_actions import (
     get_demerger_by_raw_symbol, get_demerger_by_bse_code,
     get_split, get_bonus
 )
-from shared_code.database import db_handler
-from shared_code.models import Stock
+from database import db_handler, Stock
 from shared_code.casparser import CASParser
 
 

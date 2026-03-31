@@ -1,26 +1,19 @@
 import logging
-import azure.functions as func
 import pandas as pd
 import requests
 import io
 import numpy as np
 from datetime import datetime
 from sqlmodel import select
-from shared_code.database import db_handler
-from shared_code.models import Stock
-from shared_code.auth_decorator import auth_required
+from database import db_handler, Stock
 
-@auth_required
-def main(req: func.HttpRequest) -> func.HttpResponse:
+def sync_market_data(params: dict, files: list):
     logging.info('SyncStockData function processed a request.')
 
     # Get data type from request (default: stock)
-    data_type = req.params.get('type', 'stock').lower()
+    data_type = params.get('type', 'stock').lower()
     if data_type not in ['stock', 'mf']:
-        return func.HttpResponse(
-            "Invalid 'type' parameter. Must be 'stock' or 'mf'.",
-            status_code=400
-        )
+        return {"message": "Invalid 'type' parameter. Must be 'stock' or 'mf'."}, 400
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -58,18 +51,13 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             nse_df = nse_df[['isin_code', 'nse_symbol', 'name_nse']]
 
         # 2. Load BSE List from uploaded CSV
-        bse_file = req.files.get('file')
-        
-        if not bse_file:
+        if not files:
             logging.error(f"No BSE CSV file found in the request.")
-            return func.HttpResponse(
-                f"Please upload the BSE file.",
-                status_code=400
-            )
+            return {"message": "No BSE CSV file found in the request."}, 400
 
         try:
             # Read the uploaded file
-            bse_content = bse_file.read().decode('utf-8-sig') # Handle potential BOM
+            bse_content = files[0].read().decode('utf-8-sig') # Handle potential BOM
             df_raw = pd.read_csv(io.StringIO(bse_content), skipinitialspace=True, index_col=False)
             df_raw.columns = df_raw.columns.str.strip()
             
@@ -79,11 +67,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         except Exception as e:
             logging.error(f"Error parsing uploaded BSE CSV: {str(e)}")
-            return func.HttpResponse(
-                f"Failed to process the uploaded CSV: {str(e)}",
-                status_code=400
-            )
-
+            return {"message": f"Error parsing uploaded BSE CSV: {str(e)}"}, 400
+        
         # Pre-process ISIN codes - strip whitespace and ensure uppercase
         nse_df['isin_code'] = nse_df['isin_code'].astype(str).str.strip().str.upper()
         bse_df['isin_code'] = bse_df['isin_code'].astype(str).str.strip().str.upper()
@@ -114,9 +99,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 batch_isins = [str(row['isin_code']).strip() for row in batch]
                 
                 # Fetch existing records for this batch by ISIN ONLY (regardless of type)
-                existing_items = session.exec(
-                    select(Stock).where(Stock.isin_code.in_(batch_isins))
-                ).all()
+                existing_items = session.exec(select(Stock).where(Stock.isin_code.in_(batch_isins))).all()   # type: ignore
                 existing_map = {s.isin_code: s for s in existing_items}
                 
                 for row in batch:
@@ -153,14 +136,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 session.commit()
                 logging.info(f"Committed batch (processed {min(i + batch_size, len(items_to_sync))}/{len(items_to_sync)})")
 
-        return func.HttpResponse(
-            f"Market data ({data_type}) sync completed successfully. Processed {len(items_to_sync)} items.",
-            status_code=200
-        )
+        return {"message": f"Successfully synced {len(merged_df)} {data_type} records from NSE and BSE."}, 200
 
     except Exception as e:
         logging.error(f"Error syncing market data: {str(e)}", exc_info=True)
-        return func.HttpResponse(
-            f"Failed to sync market data: {str(e)}",
-            status_code=500
-        )
+        return {"error": f"Failed to sync market data: {str(e)}"}, 500

@@ -12,8 +12,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 from shared_code.pdf_processor import ExtractHoldings
-from shared_code.database import db_handler
-from shared_code.models import GoogleOAuthToken, User, Holdings, Transaction, IPO
+from database import db_handler, GoogleOAuthToken, User, Holdings, Transaction, IPO
 
 class GetHoldingsFromGmail:
     def __init__(self, user_id: str):

@@ -1,12 +1,12 @@
 import logging
 import json
-import azure.functions as func
 import uuid
+import traceback
 from datetime import datetime
 from sqlmodel import select
 from google_auth_oauthlib.flow import Flow
-from shared_code.database import db_handler
-from shared_code.models import GoogleOAuthToken
+
+from database import db_handler, GoogleOAuthToken
 
 def create_token_from_code(user_id: str, code: str, redirect_uri: str = "http://localhost:7071/") -> str:
     SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
@@ -53,42 +53,21 @@ def create_token_from_code(user_id: str, code: str, redirect_uri: str = "http://
     return "Token successfully stored in database!"
 
 
-def main(req: func.HttpRequest) -> func.HttpResponse:
+def exchange_code_for_token(req_body: dict):
     logging.info('Python HTTP trigger function processed a request to exchange auth code for token.')
 
     try:
-        try:
-            req_body = req.get_json() if req.get_body() else {}
-        except ValueError:
-            req_body = {}
-            
-        code = req.params.get('code') or req_body.get('code')
-        # Google OAuth callback returns state, which we will use for user_id
-        user_id = req.params.get('state') or req_body.get('user_id')
-        
-        # When Google redirects back, it's returning to the URI that was configured previously.
+        code = req_body.get('code')
+        user_id = req_body.get('state') or req_body.get('user_id')
+
         redirect_uri = req_body.get('redirect_uri') or 'http://localhost:7071/api/gmail/oauth-callback/'
 
         if not code or not user_id:
-            return func.HttpResponse(
-                "Please provide a valid authorization 'code' and 'user_id' (can be passed via 'state' query parameter).",
-                status_code=400
-            )
+            return {"error": "Please provide a valid authorization 'code' and 'user_id' (can be passed via 'state' query parameter)."}, 400
 
-        # Exchange the code and write it to database
         result_msg = create_token_from_code(user_id=user_id, code=code, redirect_uri=redirect_uri)
-        
-        return func.HttpResponse(
-            body=json.dumps({"message": result_msg}),
-            mimetype="application/json",
-            status_code=200
-        )
-            
+        return {"message": result_msg}, 200
+
     except Exception as e:
-        logging.error(f"Error authenticating with Google: {str(e)}")
-        import traceback
         logging.error(traceback.format_exc())
-        return func.HttpResponse(
-            f"Error exchanging OAuth code: {str(e)}",
-            status_code=500
-        )
+        return {"error": f"Error exchanging OAuth code: {str(e)}"}, 500

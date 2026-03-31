@@ -1,6 +1,6 @@
 from typing import Optional, List
 from sqlmodel import Field, SQLModel, Relationship
-from datetime import datetime
+from datetime import datetime, date
 
 class User(SQLModel, table=True):
     user_id: str = Field(primary_key=True, max_length=36)
@@ -72,4 +72,46 @@ class IPO(SQLModel, table=True):
     isin_code: Optional[str] = Field(default=None, index=True, max_length=20)
     offer_price: Optional[float] = Field(default=None)
     ipo_listing_date: Optional[datetime] = Field(default=None)
+    last_updated: datetime = Field(default_factory=datetime.now, nullable=False)
+
+class EmailTasks(SQLModel, table=True):
+    id: int = Field(primary_key=True, max_length=36)
+    message_id: str = Field(default=None, index=True, max_length=255)
+    history_id: str = Field(default=None, index=True, max_length=255)
+    status: str = Field(default=None, index=True, max_length=20)
+    email_address: str = Field(default=None, index=True, max_length=255)
+    created_at: datetime = Field(default_factory=datetime.now, nullable=False)
+
+
+class Demerger(SQLModel, table=True):
+    """One row per child entity produced by a demerger event."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    effective_date: date = Field(nullable=False)
+    original_symbol: str = Field(max_length=50)   # raw NSE symbol, e.g. "TATAMOTORS"
+    bse_scrip_code: Optional[str] = Field(default=None, max_length=20)
+    child_symbol: str = Field(max_length=50)                   # e.g. "TMPV"
+    child_bse_symbol: Optional[str] = Field(default=None, max_length=50)
+    company_name: str = Field(max_length=255)
+    ratio: float = Field(default=1.0)                          # shares issued per 1 original share
+    price_ratio: float = Field(default=1.0)                    # fraction of cost allocated here
+    keep_original: bool = Field(default=True)
+    last_updated: datetime = Field(default_factory=datetime.now, nullable=False)
+
+
+class StockSplit(SQLModel, table=True):
+    """Stock split / sub-division records."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    effective_date: date = Field(nullable=False)
+    symbol: str = Field(max_length=50)             # raw NSE symbol, e.g. "DRREDDY"
+    ratio: int = Field(default=1)                              # new shares per 1 old share
+    last_updated: datetime = Field(default_factory=datetime.now, nullable=False)
+
+
+class Bonus(SQLModel, table=True):
+    """Bonus issue records."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    effective_date: date = Field(nullable=False)
+    symbol: str = Field(max_length=50)             # raw NSE symbol, e.g. "KARURVYSYA"
+    bonus: int = Field(default=1)                              # bonus shares issued
+    per: int = Field(default=1)                                # per N existing shares held
     last_updated: datetime = Field(default_factory=datetime.now, nullable=False)
