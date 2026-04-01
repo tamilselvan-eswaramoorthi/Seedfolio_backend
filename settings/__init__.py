@@ -24,14 +24,15 @@ async def sync_ipo(request: Request):
 async def sync_market(
     request: Request,
     params: Optional[dict] = Form(None),
-    files: List[UploadFile] = File(None)
+    file: UploadFile = File(None)
 ):
     """
     Sync market data endpoint
     """
+    print (file)
     if not params:
         params = {}
-    response, status_code = sync_market_data(params=params, files=files)
+    response, status_code = await sync_market_data(params=params, file=file)
     return JSONResponse(content=response, status_code=status_code)
 
 @settings_router.get("/sync_corporate_actions")

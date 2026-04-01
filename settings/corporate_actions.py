@@ -1,12 +1,14 @@
 import logging
 import traceback
+from typing import Optional
 import requests
+from collections import defaultdict
 from datetime import datetime, timedelta
 
 from sqlmodel import select
 
 from config import Config
-from database import db_handler, StockSplit, Bonus, Demerger
+from database import db_handler, StockSplit, Bonus, Demerger, Stock
 
 
 
@@ -68,13 +70,11 @@ def _upsert_splits(records: list) -> int:
     saved = 0
     with db_handler.get_session() as session:
         for rec in records:
-            # Expected API fields (adjust keys if TradeBrains response differs)
-            symbol = (rec.get("nse_symbol") or rec.get("symbol") or "").strip().upper()
-            eff_date = _parse_date(rec.get("ex_date") or rec.get("effective_date") or "")
+            symbol = str(rec.get("symbol") or "").strip().upper()
+            eff_date = _parse_date(rec.get("split_date"))
             ratio_raw = rec.get("split_ratio") or rec.get("ratio") or "1:1"
             if not symbol or not eff_date:
                 continue
-            # ratio like "1:5" means 5 new shares per 1 old
             try:
                 parts = str(ratio_raw).split(":")
                 ratio = int(parts[1]) if len(parts) == 2 else int(ratio_raw)
@@ -106,9 +106,9 @@ def _upsert_bonus(records: list) -> int:
     saved = 0
     with db_handler.get_session() as session:
         for rec in records:
-            symbol = (rec.get("nse_symbol") or rec.get("symbol") or "").strip().upper()
-            eff_date = _parse_date(rec.get("ex_date") or rec.get("effective_date") or "")
-            ratio_raw = rec.get("bonus_ratio") or rec.get("ratio") or "1:1"
+            symbol = str(rec.get("symbol") or "").strip().upper()
+            eff_date = _parse_date(rec.get("ex_date") or "")
+            ratio_raw = rec.get("bonus_ratio") or "1:1"
             if not symbol or not eff_date:
                 continue
             # ratio like "1:2" means 1 bonus share per 2 held
@@ -142,50 +142,108 @@ def _upsert_bonus(records: list) -> int:
 
 
 def _upsert_demergers(records: list) -> int:
-    """Insert or update Demerger rows (one row per child)."""
+    """
+    Insert or update Demerger rows.
+    """
+
+    # ── 1. Filter to demerger rows only and group them ──────────────────────
+    groups: dict = defaultdict(list)
+    for rec in records:
+        if rec.get("types", "").lower() != "demerger":
+            continue
+        symbol = str(rec.get("symbol") or "").strip().upper()
+        eff_date = _parse_date(str(rec.get("date") or "").strip())
+        if not symbol or not eff_date:
+            continue
+        groups[(symbol, eff_date)].append(rec)
+
+    if not groups:
+        return 0
+
     saved = 0
     with db_handler.get_session() as session:
-        for rec in records:
-            original_symbol = str(rec.get("nse_symbol") or rec.get("symbol") or "").strip().upper()
-            bse_code = str(rec.get("bse_code") or rec.get("bse_scrip_code") or None)
-            eff_date = _parse_date(rec.get("ex_date") or rec.get("effective_date") or "")
-            company_name = str(rec.get("company_name") or rec.get("name") or "")
-            child_symbol = str(rec.get("child_symbol") or rec.get("new_symbol") or original_symbol).strip().upper()
-            child_bse = str(rec.get("child_bse_symbol") or None)
-            ratio = float(rec.get("ratio") or 1.0)
-            price_ratio = float(rec.get("price_ratio") or 1.0)
-            keep_original = bool(rec.get("keep_original", True))
-            print (f"Processing demerger: {original_symbol} → {child_symbol} on {eff_date} (ratio={ratio}, price_ratio={price_ratio})")
 
-            if not original_symbol or not eff_date:
-                continue
+        for (original_symbol, eff_date), group_recs in groups.items():
 
+            # ── 2. Resolve original stock → ISIN ────────────────────────────
+            if original_symbol.isdigit():
+                orig_stock = session.exec(
+                    select(Stock).where(Stock.bse_symbol == original_symbol)
+                ).first()
+            else:
+                orig_stock = session.exec(
+                    select(Stock).where(Stock.nse_symbol == original_symbol)
+                ).first()
+            original_isin_code = orig_stock.isin_code if orig_stock else None
+
+            # ── 3. Collect unique children (by instname) ────────────────────
+            # Each API row has:
+            #   comp_name  = the company being split / that holds the share
+            #   instname   = the new entity created (child)
+            seen_children: set = set()
+            children: list = []          # list of instname strings, deduped
+            for rec in group_recs:
+                child_name = str(rec.get("instname") or "").strip()
+                if child_name and child_name not in seen_children:
+                    seen_children.add(child_name)
+                    children.append(child_name)
+
+            # ── 4. Map children → ISIN codes ────────────────────────────────
+            def isin_for(name: str) -> Optional[str]:
+                stock = session.exec(
+                    select(Stock).where(Stock.name == name)
+                ).first()
+                return stock.isin_code if stock else None
+
+            child_1_isin = isin_for(children[0]) if len(children) > 0 else None
+            child_2_isin = isin_for(children[1]) if len(children) > 1 else None
+            child_1_name = children[0] if len(children) > 0 else None
+            child_2_name = children[1] if len(children) > 1 else None
+
+            # ── 5. Parse split ratio (e.g. "1:1" → 1.0) ────────────────────
+            def parse_ratio(raw) -> float:
+                try:
+                    parts = str(raw or "1:1").split(":")
+                    if len(parts) == 2:
+                        return float(parts[0]) / float(parts[1])
+                    return float(parts[0])
+                except (ValueError, ZeroDivisionError):
+                    return 1.0
+
+            ratio_raw = group_recs[0].get("merger_ratio", "1:1")
+            split_ratio = parse_ratio(ratio_raw)
+
+            # ── 6. Upsert ────────────────────────────────────────────────────
             existing = session.exec(
                 select(Demerger).where(
-                    Demerger.original_symbol == original_symbol,
-                    Demerger.child_symbol == child_symbol,
+                    Demerger.original_isin_code == original_isin_code,
                     Demerger.effective_date == eff_date,
                 )
             ).first()
+
             if existing:
-                existing.ratio = ratio
-                existing.price_ratio = price_ratio
-                existing.keep_original = keep_original
-                existing.company_name = company_name
-                existing.bse_scrip_code = bse_code
+                existing.child_1_isin_code = child_1_isin
+                existing.child_1_split_ratio = split_ratio
+                existing.child_2_isin_code = child_2_isin
+                existing.child_2_split_ratio = split_ratio
+                existing.child_1_name = child_1_name
+                existing.child_2_name = child_2_name
+
                 existing.last_updated = datetime.now()
                 session.add(existing)
             else:
                 session.add(Demerger(
-                    original_symbol=original_symbol,
-                    bse_scrip_code=bse_code,
-                    child_symbol=child_symbol,
-                    child_bse_symbol=child_bse,
-                    company_name=company_name,
                     effective_date=eff_date,
-                    ratio=ratio,
-                    price_ratio=price_ratio,
-                    keep_original=keep_original,
+                    original_symbol=original_symbol,
+                    original_isin_code=original_isin_code,
+                    child_1_name=child_1_name,
+                    child_1_isin_code=child_1_isin,
+                    child_1_split_ratio=split_ratio,
+                    child_1_price_percentage=100.0,
+                    child_2_name=child_2_name,
+                    child_2_isin_code=child_2_isin,
+                    child_2_split_ratio=split_ratio,
+                    child_2_price_percentage=100.0,
                     last_updated=datetime.now(),
                 ))
             saved += 1

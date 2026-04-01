@@ -5,9 +5,12 @@ import io
 import numpy as np
 from datetime import datetime
 from sqlmodel import select
+from fastapi import UploadFile
 from database import db_handler, Stock
 
-def sync_market_data(params: dict, files: list):
+import asyncio
+
+async def sync_market_data(params: dict, file: UploadFile):
     logging.info('SyncStockData function processed a request.')
 
     # Get data type from request (default: stock)
@@ -51,13 +54,14 @@ def sync_market_data(params: dict, files: list):
             nse_df = nse_df[['isin_code', 'nse_symbol', 'name_nse']]
 
         # 2. Load BSE List from uploaded CSV
-        if not files:
+        if not file:
             logging.error(f"No BSE CSV file found in the request.")
             return {"message": "No BSE CSV file found in the request."}, 400
 
         try:
             # Read the uploaded file
-            bse_content = files[0].read().decode('utf-8-sig') # Handle potential BOM
+            bse_bytes = await file.read()
+            bse_content = bse_bytes.decode('utf-8-sig') # Handle potential BOM
             df_raw = pd.read_csv(io.StringIO(bse_content), skipinitialspace=True, index_col=False)
             df_raw.columns = df_raw.columns.str.strip()
             

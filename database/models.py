@@ -86,15 +86,17 @@ class EmailTasks(SQLModel, table=True):
 class Demerger(SQLModel, table=True):
     """One row per child entity produced by a demerger event."""
     id: Optional[int] = Field(default=None, primary_key=True)
+    original_symbol: Optional[str] = Field(default=None, max_length=50)  # raw NSE symbol of original company, e.g. "TATAMOTORS"
     effective_date: date = Field(nullable=False)
-    original_symbol: str = Field(max_length=50)   # raw NSE symbol, e.g. "TATAMOTORS"
-    bse_scrip_code: Optional[str] = Field(default=None, max_length=20)
-    child_symbol: str = Field(max_length=50)                   # e.g. "TMPV"
-    child_bse_symbol: Optional[str] = Field(default=None, max_length=50)
-    company_name: str = Field(max_length=255)
-    ratio: float = Field(default=1.0)                          # shares issued per 1 original share
-    price_ratio: float = Field(default=1.0)                    # fraction of cost allocated here
-    keep_original: bool = Field(default=True)
+    original_isin_code: Optional[str] = Field(default=None, max_length=20)
+    child_1_name: Optional[str] = Field(default=None, max_length=255)
+    child_1_isin_code: Optional[str] = Field(default=None, max_length=20)
+    child_1_split_ratio: float = Field(default=1.0)   # new shares per 1 old share
+    child_1_price_percentage: float = Field(default=100.0)   # child 1 price as % of original
+    child_2_name: Optional[str] = Field(default=None, max_length=255)
+    child_2_isin_code: Optional[str] = Field(default=None, max_length=20)
+    child_2_split_ratio: float = Field(default=1.0)   # new shares per 1 old share
+    child_2_price_percentage: float = Field(default=100.0)   # child 2 price as % of original
     last_updated: datetime = Field(default_factory=datetime.now, nullable=False)
 
 

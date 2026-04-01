@@ -4,6 +4,7 @@ openpyxl
 azure-functions
 python-dotenv
 pyodbc
+pymysql
 python-jose[cryptography]
 pymupdf
 sqlmodel

@@ -8,12 +8,21 @@ class Database:
     def __init__(self):
         driver = urllib.parse.quote_plus("ODBC Driver 18 for SQL Server")
         password = urllib.parse.quote_plus(Config.DB_PASSWORD)
-        db_conn_str = (
-            f"mssql+pyodbc://{Config.DB_USER}:{password}"
-            f"@{Config.DB_HOST}:{Config.DB_PORT}/{Config.DB_NAME}"
-            f"?driver={driver}"
-            f"&Encrypt=yes&TrustServerCertificate=yes&Connection Timeout=30"
-        )
+        if Config.DB_HOST.endswith(".database.windows.net"):
+            db_conn_str = (
+                f"mssql+pyodbc://{Config.DB_USER}:{password}"
+                f"@{Config.DB_HOST}:{Config.DB_PORT}/{Config.DB_NAME}"
+                f"?driver={driver}"
+                f"&Encrypt=yes&TrustServerCertificate=yes&Connection Timeout=30"
+            )
+        elif Config.DB_HOST == "localhost":
+            # Local MySQL connection string
+            db_conn_str = (
+                f"mysql+pymysql://{Config.DB_USER}:{password}"
+                f"@{Config.DB_HOST}:{Config.DB_PORT}/{Config.DB_NAME}"
+            )
+        else:
+            raise ValueError("Unsupported DB_HOST. Must be either Azure SQL or localhost for MySQL.")
         self.engine = create_engine(db_conn_str, 
                                     echo=False,
                                     poolclass=QueuePool,
