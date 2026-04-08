@@ -10,7 +10,6 @@ def sync_transactions(user_id) -> tuple[dict, int]:
     logging.info('Triggered SyncIncrementalNSEHoldings API')
     try:
         with db_handler.get_session() as session:
-            # Find max date
             max_date = session.query(func.max(Transaction.transaction_datetime)).filter(Transaction.user_id == user_id).scalar()
 
             if max_date is not None:

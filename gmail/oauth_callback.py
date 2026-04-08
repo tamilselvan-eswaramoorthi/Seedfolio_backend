@@ -6,9 +6,10 @@ from datetime import datetime
 from sqlmodel import select
 from google_auth_oauthlib.flow import Flow
 
+from config import Config
 from database import db_handler, GoogleOAuthToken
 
-def create_token_from_code(user_id: str, code: str, redirect_uri: str = "http://localhost:7071/") -> str:
+def create_token_from_code(user_id: str, code: str, redirect_uri: str = Config.REDIRECT_URI) -> str:
     SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
     flow = Flow.from_client_secrets_file(
         "credentials.json",
@@ -53,19 +54,14 @@ def create_token_from_code(user_id: str, code: str, redirect_uri: str = "http://
     return "Token successfully stored in database!"
 
 
-def exchange_code_for_token(req_body: dict):
+def exchange_code_for_token(code, state):
     logging.info('Python HTTP trigger function processed a request to exchange auth code for token.')
 
     try:
-        code = req_body.get('code')
-        user_id = req_body.get('state') or req_body.get('user_id')
-
-        redirect_uri = req_body.get('redirect_uri') or 'http://localhost:7071/api/gmail/oauth-callback/'
-
-        if not code or not user_id:
+        if not code or not state:
             return {"error": "Please provide a valid authorization 'code' and 'user_id' (can be passed via 'state' query parameter)."}, 400
 
-        result_msg = create_token_from_code(user_id=user_id, code=code, redirect_uri=redirect_uri)
+        result_msg = create_token_from_code(user_id=state, code=code)
         return {"message": result_msg}, 200
 
     except Exception as e:

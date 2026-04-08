@@ -13,7 +13,7 @@ class Config:
 
     PWD_CONTEXT = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-    REDIRECT_URI = os.getenv('REDIRECT_URI', "http://localhost:7071/api/gmail/oauth-callback/").strip()
+    REDIRECT_URI = os.getenv('REDIRECT_URI', "http://localhost:7071/api/v1/gmail/oauth-callback/").strip()
     
     JWT_SECRET = os.getenv('JWT_SECRET', 'your-secret-key').strip()
     JWT_ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS256').strip()

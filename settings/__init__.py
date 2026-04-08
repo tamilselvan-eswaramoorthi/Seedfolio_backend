@@ -29,7 +29,6 @@ async def sync_market(
     """
     Sync market data endpoint
     """
-    print (file)
     if not params:
         params = {}
     response, status_code = await sync_market_data(params=params, file=file)
