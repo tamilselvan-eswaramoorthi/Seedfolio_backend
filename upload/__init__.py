@@ -28,6 +28,6 @@ def upload_transactions_endpoint(
     """
     Upload transactions from UI
     """
-    user_id = request.user_id
+    user_id = request.user_id # type: ignore
     response_data, status_code = upload_transactions(broker, file, user_id)
     return JSONResponse(content=response_data, status_code=status_code)

@@ -9,7 +9,7 @@ from user_management import user_mgmt_router
 from gmail import gmail_router
 from settings import settings_router
 from upload import upload_router
-
+from performance import perf_router
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +30,7 @@ app.include_router(user_mgmt_router)
 app.include_router(gmail_router)
 app.include_router(settings_router)
 app.include_router(upload_router)
+app.include_router(perf_router)
 
 @app.get("/health")
 async def health():

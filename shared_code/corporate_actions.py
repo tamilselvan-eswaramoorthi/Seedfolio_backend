@@ -2,7 +2,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from sqlmodel import select
-from database import db_handler, Demerger, StockSplit, Bonus
+from database import db_handler, Demerger, StockSplit, Bonus, Stock
 
 def _rows_to_demerger_dict(rows) -> Optional[Dict[str, Any]]:
     """Convert a list of Demerger DB rows (same original symbol) into the
@@ -13,17 +13,19 @@ def _rows_to_demerger_dict(rows) -> Optional[Dict[str, Any]]:
     return {
         "effective_date": first.effective_date,
         "raw_symbol": first.original_symbol,
-        "bse_scrip_code": first.bse_scrip_code,
         "children": [
             {
-                "symbol": r.child_symbol,
-                "bse_symbol": r.child_bse_symbol,
-                "company_name": r.company_name,
-                "ratio": r.ratio,
-                "price_ratio": r.price_ratio,
-                "keep_original": r.keep_original,
+                "isin": first.child_1_isin_code,
+                "company_name": first.child_1_name,
+                "ratio": first.child_1_split_ratio,
+                "price_ratio": float(first.child_1_price_percentage) / 100.0,
+            },
+            {
+                "isin": first.child_2_isin_code,
+                "company_name": first.child_2_name,
+                "ratio": first.child_2_split_ratio,
+                "price_ratio": float(first.child_2_price_percentage) / 100.0,
             }
-            for r in rows
         ],
     }
 
@@ -43,7 +45,8 @@ def _get_demerger_from_db(*, raw_symbol: Optional[str] = None, bse_scrip_code: O
             if transaction_date:
                 rows = [r for r in rows if transaction_date <= r.effective_date]
             return _rows_to_demerger_dict(rows)
-    except Exception:
+    except Exception as e:
+        print(f"Error fetching demerger from DB: {e}")
         return None
 
 
@@ -79,6 +82,7 @@ def get_demerger_by_raw_symbol(raw_symbol: str, transaction_date: date) -> Optio
     if isinstance(transaction_date, str):
         transaction_date = datetime.strptime(transaction_date, "%Y-%m-%d").date()
     result = _get_demerger_from_db(raw_symbol=raw_symbol, transaction_date=transaction_date)
+    print (result)
     if result:
         return result
 
