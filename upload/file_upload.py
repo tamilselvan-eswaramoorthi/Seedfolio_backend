@@ -55,6 +55,9 @@ def upload_transactions(broker, file, user_id):
                 for _, row in df.iterrows():
                     if pd.isna(row['order_execution_time']):
                         continue
+                    row['symbol'] = row['symbol'].strip().upper()
+                    row['symbol'] = row['symbol'].split(".")[0]
+                    row['symbol'] = ''.join(e for e in row['symbol'] if e.isalnum())
                     stock_details = session.query(Stock).filter(Stock.nse_symbol == row['symbol']).first()
                     stock_name = stock_details.name if stock_details else ""
                     transaction = Transaction(
