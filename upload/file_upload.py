@@ -4,8 +4,53 @@ from datetime import datetime
 import pandas as pd
 
 from sqlmodel import select
-from database import db_handler, Transaction, Stock, Holdings
+from database import db_handler, Transaction, Stock, Holdings, Demerger
 from shared_code.corporate_actions import get_split, get_bonus, get_demerger_by_raw_symbol
+
+
+def _clean_uploaded_symbol(symbol):
+    symbol = str(symbol or "").strip().upper()
+    symbol = symbol.split(".")[0]
+    return ''.join(e for e in symbol if e.isalnum())
+
+
+def _normalize_company_name(name):
+    return ''.join(e for e in str(name or "").upper() if e.isalnum())
+
+
+def _get_demerger_parent_symbol(session, symbol, trade_date, stock_details=None):
+    """
+    Some broker files can contain one of the post-demerger company names/symbols
+    for trades that happened before the demerger effective date. In that case,
+    resolve the uploaded child back to the original company symbol so the normal
+    demerger expansion can run.
+    """
+    clean_symbol = _clean_uploaded_symbol(symbol)
+    candidate_isins = set()
+    candidate_names = {_normalize_company_name(clean_symbol)}
+
+    if stock_details:
+        if stock_details.isin_code:
+            candidate_isins.add(stock_details.isin_code)
+        candidate_names.add(_normalize_company_name(stock_details.name))
+
+    rows = session.exec(select(Demerger).where(Demerger.effective_date >= trade_date)).all()
+
+    for row in rows:
+        original_symbol = _clean_uploaded_symbol(row.original_symbol)
+        if not original_symbol or original_symbol == clean_symbol:
+            continue
+
+        child_isins = {isin for isin in (row.child_1_isin_code, row.child_2_isin_code) if isin}
+        if candidate_isins.intersection(child_isins):
+            return original_symbol
+
+        child_names = {_normalize_company_name(name) for name in (row.child_1_name, row.child_2_name) if name}
+        if candidate_names.intersection(child_names):
+            return original_symbol
+
+    return None
+
 
 def upload_transactions(broker, file, user_id):
     try: 
@@ -26,6 +71,8 @@ def upload_transactions(broker, file, user_id):
                     'Price': 'price',
                     'Exchange': 'exchange'
                 })
+                df['order_execution_time'] = df['order_execution_time'].astype(str).str.replace("'", "")
+                df['order_execution_time'] = pd.to_datetime(df['order_execution_time'], format='%Y-%m-%dT%H:%M:%S')
 
             else:
                 return {"message": "Invalid file format"}, 400
@@ -43,6 +90,7 @@ def upload_transactions(broker, file, user_id):
                     'Value': 'value',
                     'Exchange': 'exchange'
                 })
+                df['order_execution_time'] = pd.to_datetime(df['order_execution_time'], format='%d-%m-%Y %I:%M %p')
                 if 'quantity' in df.columns and 'value' in df.columns:
                     df['price'] = df['value'] / df['quantity']
                 else:
@@ -55,15 +103,26 @@ def upload_transactions(broker, file, user_id):
                 for _, row in df.iterrows():
                     if pd.isna(row['order_execution_time']):
                         continue
-                    row['symbol'] = row['symbol'].strip().upper()
-                    row['symbol'] = row['symbol'].split(".")[0]
-                    row['symbol'] = ''.join(e for e in row['symbol'] if e.isalnum())
+                    row['symbol'] = _clean_uploaded_symbol(row['symbol'])
                     stock_details = session.query(Stock).filter(Stock.nse_symbol == row['symbol']).first()
+                    transaction_datetime = row['order_execution_time']
+                    trade_date = (
+                        transaction_datetime.date()
+                        if isinstance(transaction_datetime, datetime)
+                        else pd.to_datetime(transaction_datetime).date()
+                    )
+                    parent_symbol = _get_demerger_parent_symbol(session, row['symbol'], trade_date, stock_details)
+                    if parent_symbol:
+                        parent_stock_details = session.query(Stock).filter(Stock.nse_symbol == parent_symbol).first()
+                        print(f"[Demerger] Treating {row['symbol']} as parent {parent_symbol} for {trade_date}")
+                        row['symbol'] = parent_symbol
+                        stock_details = parent_stock_details
+
                     stock_name = stock_details.name if stock_details else ""
                     transaction = Transaction(
                         transaction_id=str(uuid4()),
                         user_id=user_id,
-                        transaction_datetime=pd.to_datetime(row['order_execution_time']),
+                        transaction_datetime=transaction_datetime,
                         stock_symbol=row['symbol'],
                         stock_name=stock_name,
                         transaction_type=row['trade_type'].upper(),
@@ -80,28 +139,8 @@ def upload_transactions(broker, file, user_id):
                     # Sort transactions by date to ensure proper holding calculation
                     transactions.sort(key=lambda x: x.transaction_datetime)
 
-                    # Update holdings
-                    # Use base symbol (without .NS/.BO) for holdings cache
-                    symbols = list(set(t.stock_symbol.split(".")[0] for t in transactions))
-                    holdings_cache = {}
-                    if symbols:
-                        existing_holdings = session.exec(
-                            select(Holdings).where(
-                                Holdings.user_id == user_id,
-                                Holdings.stock_symbol.in_(symbols) # type: ignore
-                            )
-                        ).all()
-                        for h in existing_holdings:
-                            holdings_cache[h.stock_symbol] = h
-
-                    # We may inject extra transactions (bonus/demerger) during iteration
-                    # so we work on an expandable list
-                    expanded_transactions = list(transactions)
-                    idx = 0
-                    while idx < len(expanded_transactions):
-                        transaction = expanded_transactions[idx]
-                        idx += 1
-
+                    expanded_transactions = []
+                    for transaction in transactions:
                         base_symbol = transaction.stock_symbol.split(".")[0]
                         qty_val = transaction.quantity
                         rate = transaction.price
@@ -125,30 +164,7 @@ def upload_transactions(broker, file, user_id):
                                 transaction.price = rate
                                 print(f"[Split] {base_symbol}: qty {old_qty_val}→{qty_val}, rate {transaction.price}→{rate}")
 
-                            # 2. Bonus — inject an extra BUY at price=0
-                            bonus_rec = get_bonus(base_symbol, trade_date)
-                            if bonus_rec:
-                                bonus_qty = int(qty_val / bonus_rec["per"]) * bonus_rec["bonus"]
-                                if bonus_qty > 0:
-                                    bonus_tx = Transaction(
-                                        transaction_id=str(uuid4()),
-                                        user_id=user_id,
-                                        transaction_datetime=transaction.transaction_datetime,
-                                        stock_symbol=transaction.stock_symbol,
-                                        stock_name=transaction.stock_name,
-                                        transaction_type="BUY",
-                                        quantity=bonus_qty,
-                                        price=0.0,
-                                        exchange=transaction.exchange,
-                                        broker=transaction.broker,
-                                        commission_local=0.0,
-                                        realized_pl=0.0,
-                                        inferred=True
-                                    )
-                                    expanded_transactions.insert(idx, bonus_tx)
-                                    print(f"[Bonus] {base_symbol}: +{bonus_qty} shares at rate=0")
-
-                            # 3. Demerger — replace this transaction with child transactions
+                            # 2. Demerger — replace this transaction with child transactions
                             demerger = get_demerger_by_raw_symbol(base_symbol, trade_date)
                             if demerger:
                                 for child in demerger.get("children", []):
@@ -179,14 +195,57 @@ def upload_transactions(broker, file, user_id):
                                         realized_pl=0.0,
                                         inferred=True
                                     )
-                                    expanded_transactions.insert(idx, child_tx)
+                                    expanded_transactions.append(child_tx)
                                     print(f"[Demerger] {base_symbol} → {child_symbol}: qty={child_qty}, rate={child_price}")
-                                # Skip recording the original transaction for demerged tickers;
-                                # child transactions above carry the value forward.
-                                session.add(transaction)  # still persist the original for audit
                                 continue
 
-                        # ── Update holdings cache ─────────────────────────────
+                            # 3. Bonus — inject an extra BUY at price=0
+                            bonus_rec = get_bonus(base_symbol, trade_date)
+                            if bonus_rec:
+                                bonus_qty = int(qty_val / bonus_rec["per"]) * bonus_rec["bonus"]
+                                if bonus_qty > 0:
+                                    bonus_tx = Transaction(
+                                        transaction_id=str(uuid4()),
+                                        user_id=user_id,
+                                        transaction_datetime=transaction.transaction_datetime,
+                                        stock_symbol=transaction.stock_symbol,
+                                        stock_name=transaction.stock_name,
+                                        transaction_type="BUY",
+                                        quantity=bonus_qty,
+                                        price=0.0,
+                                        exchange=transaction.exchange,
+                                        broker=transaction.broker,
+                                        commission_local=0.0,
+                                        realized_pl=0.0,
+                                        inferred=True
+                                    )
+                                    expanded_transactions.append(bonus_tx)
+                                    print(f"[Bonus] {base_symbol}: +{bonus_qty}")
+
+                        expanded_transactions.append(transaction)
+
+                    # Use final expanded symbols for holdings lookup. Demerger
+                    # children such as TMPV/TMCV may not exist in the upload.
+                    symbols = list(set(t.stock_symbol.split(".")[0] for t in expanded_transactions))
+                    holdings_cache = {}
+                    if symbols:
+                        existing_holdings = session.exec(
+                            select(Holdings).where(
+                                Holdings.user_id == user_id,
+                                Holdings.stock_symbol.in_(symbols) # type: ignore
+                            )
+                        ).all()
+                        for h in existing_holdings:
+                            holdings_cache[h.stock_symbol] = h
+                    
+                    # Update to holdings and save transactions
+                    for transaction in expanded_transactions:
+                        session.add(transaction)
+                        base_symbol = transaction.stock_symbol.split(".")[0]
+                        qty_val = transaction.quantity
+                        rate = transaction.price
+                        transaction_type = transaction.transaction_type.upper()
+
                         if base_symbol in holdings_cache:
                             holding = holdings_cache[base_symbol]
                             old_qty = holding.quantity
@@ -228,11 +287,10 @@ def upload_transactions(broker, file, user_id):
                                 holding_datetime=transaction.transaction_datetime
                             )
                             holdings_cache[base_symbol] = holding
-                            session.add(holding)
-                        
-                        session.add(transaction)
-                    
+                            session.add(holding)                    
                     session.commit()
                 return {"message": f"Successfully processed {len(transactions)} transactions"}, 200
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return {"message": str(e)}, 500
