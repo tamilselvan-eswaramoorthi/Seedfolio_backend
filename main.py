@@ -1,6 +1,7 @@
 import os
 import logging
 import uvicorn
+from warnings import filterwarnings
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,6 +15,7 @@ from performance import perf_router
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+filterwarnings("ignore", category=UserWarning)
 
 app = FastAPI(title="Seedfolio API", root_path="/api/v1")
 
