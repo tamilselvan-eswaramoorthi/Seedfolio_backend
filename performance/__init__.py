@@ -44,3 +44,16 @@ async def get_daily_data(request: Request):
         return JSONResponse(content={"message": "Unauthorized"}, status_code=401)
     response, status_code = PortfolioPerformance(user_id).daily_performance()
     return JSONResponse(content=response, status_code=status_code)
+
+
+@perf_router.get("/get_daily_movers")
+@auth_required
+async def get_daily_movers(request: Request):
+    """
+    Get daily movers
+    """
+    user_id = request.user_id
+    if not isinstance(user_id, str) or not user_id:
+        return JSONResponse(content={"message": "Unauthorized"}, status_code=401)
+    response, status_code = PortfolioPerformance(user_id).daily_movers()
+    return JSONResponse(content=response, status_code=status_code)

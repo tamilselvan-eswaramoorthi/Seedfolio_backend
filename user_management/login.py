@@ -19,6 +19,20 @@ def create_access_token(data: dict):
     encoded_jwt = jwt.encode(to_encode, Config.JWT_SECRET, algorithm=Config.JWT_ALGORITHM)
     return encoded_jwt
 
+def decode_access_token(token: str):
+    try:
+        payload = jwt.decode(token, Config.JWT_SECRET, algorithms=[Config.JWT_ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise ValueError("Token does not contain a valid 'sub' claim.")
+        return username
+    except jwt.ExpiredSignatureError:
+        logging.warning("Token has expired.")
+        raise ValueError("Token has expired.")
+    except jwt.JWTError as e:
+        logging.error(f"Invalid token: {e}")
+        raise ValueError("Invalid token.")
+
 def login_user(body: dict):
     """
     Standard login logic, independent of web framework.
@@ -32,11 +46,11 @@ def login_user(body: dict):
         return {"error": "Please provide both username and password."}, 400
 
     with db_handler.get_session() as session:
-        user = session.exec(select(User).where(User.username == username)).first()
+        user = session.exec(select(User).where(User.username == username.lower())).first()
 
         if user and verify_password(password, user.hashed_password):
-            access_token = create_access_token(data={"sub": username})
-            
+            access_token = create_access_token(data={"sub": username.lower()})
+
             # update last login time
             user.last_login = datetime.now()
             session.add(user)

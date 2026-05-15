@@ -231,6 +231,7 @@ class PortfolioPerformance:
                 "risk_metrics": self.risk_metrics(),
                 "benchmarks": self.benchmark_returns(),
                 "periods": self.period_returns(current_value),
+                "days_since_last_contribution": (self.today - self.transactions[-1].transaction_datetime.date()).days if self.transactions else None,
             }
         }, 200
     
@@ -315,3 +316,60 @@ class PortfolioPerformance:
                 "nifty_50_return_pct": pct_return(portfolio_value, nifty_value),
             })
         return {"daily_performance": rows}, 200
+
+
+    def daily_movers(self, is_today = True, count = None):
+        """
+        Get daily movers, return top 5 gainers and top 5 losers from my holdings with today's percentage change and value change
+        """
+        if self.history is None or self.history.empty:
+            return {"daily_performance": []}, 200
+
+        end_date = self.today if is_today else self.today - timedelta(days=1)
+        
+        all_movers = []
+        for symbol, data in self.symbol_data.items():
+            series = close_series(self.history, yahoo_ticker(symbol))
+            if series is None or series.empty:
+                current_price = data["avg_buy"]
+                prev_price = data["avg_buy"]
+            else:
+                sliced = series.loc[:str(end_date)].dropna()
+                if len(sliced) >= 2:
+                    current_price = float(sliced.iloc[-1])
+                    prev_price = float(sliced.iloc[-2])
+                elif len(sliced) == 1:
+                    current_price = float(sliced.iloc[-1])
+                    prev_price = data["avg_buy"]
+                else:
+                    current_price = data["avg_buy"]
+                    prev_price = data["avg_buy"]
+            
+            current_value = data["qty"] * current_price
+            prev_value = data["qty"] * prev_price
+            
+            today_gain = current_value - prev_value
+            
+            all_movers.append({
+                "stock_symbol": symbol,
+                "company_name": data.get("company_name", ""),
+                "current_price": round(current_price, 2),
+                "current_value": round(current_value, 2),
+                "gain": round(today_gain, 2),
+                "gain_precentage": pct_return(current_value, prev_value),
+            })
+            
+        all_movers.sort(key=lambda x: x["gain_precentage"], reverse=True)
+        
+        # split positive and negative movers
+        positive_movers = [m for m in all_movers if m["gain"] > 0]
+        negative_movers = [m for m in all_movers if m["gain"] < 0]
+
+        if count is not None:
+            positive_movers = positive_movers[:count]
+            negative_movers = sorted(negative_movers, key=lambda x: x["gain_precentage"])[:count]
+
+        return {
+            "top_gainers": positive_movers,
+            "top_losers": negative_movers,
+        }, 200
