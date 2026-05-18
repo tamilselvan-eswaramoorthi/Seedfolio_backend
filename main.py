@@ -10,14 +10,14 @@ from user_management import user_mgmt_router
 from gmail import gmail_router
 from settings import settings_router
 from upload import upload_router
-from performance import perf_router
+from home import perf_router
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 filterwarnings("ignore", category=UserWarning)
 
-app = FastAPI(title="Seedfolio API", root_path="/api/v1")
+app = FastAPI(title="Knotwealth API", root_path="/api/v1")
 
 # CORS middleware
 app.add_middleware(
